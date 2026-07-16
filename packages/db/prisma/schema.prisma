@@ -1,0 +1,84 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// A tenant. Every row in every other table is scoped to one Mfd via mfdId —
+/// application code must filter on it in every query (row-level tenant isolation).
+model Mfd {
+  id                String             @id @default(uuid()) @db.Uuid
+  name              String
+  inboundEmailAlias String             @unique @map("inbound_email_alias")
+  createdAt         DateTime           @default(now()) @map("created_at")
+
+  rtaCredentials    MfdRtaCredential[]
+  ledgerEntries     RtaInsightLedger[]
+
+  @@map("mfd")
+}
+
+/// Per-tenant RTA archive passwords, encrypted at rest with AES-256-GCM
+/// (see CREDENTIAL_ENCRYPTION_KEY). Never store the plaintext password.
+model MfdRtaCredential {
+  id                String   @id @default(uuid()) @db.Uuid
+  mfdId             String   @map("mfd_id") @db.Uuid
+  mfd               Mfd      @relation(fields: [mfdId], references: [id])
+  rtaType           String   @map("rta_type") // 'CAMS' | 'KFINTECH'
+  encryptedPassword String   @map("encrypted_password")
+  encryptionIv      String   @map("encryption_iv")
+  encryptionAuthTag String   @map("encryption_auth_tag")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  @@unique([mfdId, rtaType])
+  @@map("mfd_rta_credentials")
+}
+
+/// Cached column-mapping blueprint produced once per unrecognized report
+/// layout by the LLM schema broker. Keyed by a fingerprint of the header
+/// row so subsequent ingests of the same report type skip the AI call.
+model ReportSchemaDefinition {
+  id                String   @id @default(uuid()) @db.Uuid
+  reportCode        String   @unique @map("report_code")
+  category          String
+  layoutFingerprint String   @unique @map("layout_fingerprint")
+  definition        Json
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  @@map("report_schema_definitions")
+}
+
+/// Normalized landing zone for every RTA report row, across all 50+ report
+/// types. Explicit columns cover the fields nearly every report shares;
+/// everything else lives in rawStructuredPayload.
+///
+/// idempotencyHash = SHA256(mfdId + folioNumber + transactionDate + schemeCode + amount + units)
+/// enforced unique so re-ingesting an overlapping daily delta is a no-op.
+///
+/// NOTE: add a GIN index on raw_structured_payload via a follow-up raw SQL
+/// migration (`CREATE INDEX ... USING gin (raw_structured_payload)`) —
+/// Prisma's declarative index `type` support for Postgres GIN is not used
+/// here to keep the schema portable across Prisma versions.
+model RtaInsightLedger {
+  id                    String    @id @default(uuid()) @db.Uuid
+  mfdId                 String    @map("mfd_id") @db.Uuid
+  mfd                   Mfd       @relation(fields: [mfdId], references: [id])
+  rtaType               String    @map("rta_type")
+  reportCode            String    @map("report_code")
+  uploadedAt            DateTime  @default(now()) @map("uploaded_at")
+
+  investorPan           String?   @map("investor_pan")
+  folioNumber           String?   @map("folio_number")
+  amcCode               String?   @map("amc_code")
+  schemeCode            String?   @map("scheme_code")
+  transactionDate        DateTime? @map("transaction_date") @db.Date
+
+  rawStructuredPayload  Json      @map("raw_structured_payload")
+  idempotencyHash       String    @unique @map("idempotency_hash")
+
+  @@index([mfdId, investorPan, folioNumber])
+  @@map("rta_insight_ledger")
+}

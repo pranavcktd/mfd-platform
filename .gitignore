@@ -1,0 +1,11 @@
+node_modules/
+dist/
+build/
+.env
+.env.local
+*.log
+.turbo/
+coverage/
+.DS_Store
+Thumbs.db
+packages/db/generated/
