@@ -1,6 +1,8 @@
 import { parse } from "csv-parse/sync";
 
-const CANDIDATE_DELIMITERS = [",", "|", "\t", ";"];
+// KFintech's inception ".txt" exports use "~" (tilde) as the field
+// delimiter, confirmed against a real MFSD201 sample export.
+const CANDIDATE_DELIMITERS = [",", "|", "\t", ";", "~"];
 
 /** Picks whichever candidate delimiter appears most consistently across the first few lines. */
 export function sniffDelimiter(text: string): string {

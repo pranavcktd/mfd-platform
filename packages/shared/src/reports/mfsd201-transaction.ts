@@ -1,16 +1,26 @@
 import { resolveTransactionType } from "./transaction-types";
+import { RtaType } from "../report-schema";
 
 export type RtaSourceFormat = "DBF" | "CSV" | "TXT";
+export type { RtaType };
 
 /**
  * Column-name aliases for the MFSD 201 (Transaction Report), taken from the
  * RTA's own "common format" reconciliation table in MailbackreportsFormats.xls
  * (sheet "MFSD201 Common format Non-Split"). `dbf` is the KFintech DBF field
- * name, `cams` is the CAMS field name (used for CAMS .txt exports), `csv` is
- * the shared CSV/Excel/TXT header used by KFintech's own CSV/TXT exports.
- * Both `cams` and `csv` are tried for CSV/TXT sources since CAMS's .txt
- * inception export uses the CAMS names while KFintech's .csv/.txt use the
- * `csv` names — this hasn't been validated against a real sample file yet.
+ * name (KFintech is the only RTA that sends DBF). `cams` is the CAMS field
+ * name, used only for CAMS-originated exports. `csv` is the header KFintech
+ * uses for both its CSV and its tilde-delimited TXT exports.
+ *
+ * The alias set to use is chosen by rtaType first, then sourceFormat — not
+ * by trying every alias against any file. Two things confirmed against real
+ * RTA sample exports made that non-negotiable:
+ *  - CAMS's "SCHEME" field name and KFintech's own (unrelated) "Scheme"
+ *    column collide case-insensitively, so blindly trying the CAMS alias
+ *    against a KFintech file silently pulls the wrong column.
+ *  - CAMS also ships .dbf files (its own WBR-series reports), using CAMS's
+ *    field names directly (AMC_CODE, FOLIO_NO, TRXNTYPE, ...) — DBF format
+ *    does not imply KFintech's DBF field names.
  */
 const MFSD201_ALIASES = {
   amcCode: { dbf: "TD_FUND", cams: "AMC_CODE", csv: "Fund" },
@@ -44,6 +54,7 @@ export interface NormalizedTransactionRecord {
   transactionTypeCode: string;
   transactionType: string;
   isRejection: boolean;
+  isRecognizedTransactionType: boolean;
   postDate: Date;
   tradeDate?: Date;
   units?: number;
@@ -62,23 +73,22 @@ function buildHeaderLookup(rawRecord: Record<string, unknown>): Map<string, stri
   return lookup;
 }
 
+function resolveAliasKey(format: RtaSourceFormat, rtaType: RtaType): "dbf" | "cams" | "csv" {
+  if (rtaType === "CAMS") {
+    return "cams";
+  }
+  return format === "DBF" ? "dbf" : "csv";
+}
+
 function getRawValue(
   rawRecord: Record<string, unknown>,
   headerLookup: Map<string, string>,
   field: Mfsd201Field,
-  format: RtaSourceFormat,
+  aliasKey: "dbf" | "cams" | "csv",
 ): unknown {
-  if (format === "DBF") {
-    return rawRecord[MFSD201_ALIASES[field].dbf];
-  }
-  const candidates = [MFSD201_ALIASES[field].cams, MFSD201_ALIASES[field].csv];
-  for (const candidate of candidates) {
-    const actualKey = headerLookup.get(candidate.trim().toLowerCase());
-    if (actualKey !== undefined) {
-      return rawRecord[actualKey];
-    }
-  }
-  return undefined;
+  const columnName = MFSD201_ALIASES[field][aliasKey];
+  const actualKey = headerLookup.get(columnName.trim().toLowerCase());
+  return actualKey !== undefined ? rawRecord[actualKey] : undefined;
 }
 
 /**
@@ -89,10 +99,12 @@ function getRawValue(
 export function looksLikeMfsd201(
   rawRecord: Record<string, unknown>,
   format: RtaSourceFormat,
+  rtaType: RtaType,
 ): boolean {
   const headerLookup = buildHeaderLookup(rawRecord);
+  const aliasKey = resolveAliasKey(format, rtaType);
   const required: Mfsd201Field[] = ["folioNumber", "amount", "transactionTypeCode", "postDate"];
-  return required.every((field) => getRawValue(rawRecord, headerLookup, field, format) !== undefined);
+  return required.every((field) => getRawValue(rawRecord, headerLookup, field, aliasKey) !== undefined);
 }
 
 function parseRtaDate(value: unknown): Date | undefined {
@@ -148,9 +160,11 @@ function requireString(value: unknown, field: string): string {
 export function mapMfsd201Record(
   rawRecord: Record<string, unknown>,
   format: RtaSourceFormat,
+  rtaType: RtaType,
 ): NormalizedTransactionRecord {
   const headerLookup = buildHeaderLookup(rawRecord);
-  const get = (field: Mfsd201Field) => getRawValue(rawRecord, headerLookup, field, format);
+  const aliasKey = resolveAliasKey(format, rtaType);
+  const get = (field: Mfsd201Field) => getRawValue(rawRecord, headerLookup, field, aliasKey);
 
   const transactionTypeCode = requireString(get("transactionTypeCode"), "transactionTypeCode");
   const resolvedType = resolveTransactionType(transactionTypeCode);
@@ -166,6 +180,7 @@ export function mapMfsd201Record(
     transactionTypeCode,
     transactionType: resolvedType.normalizedType,
     isRejection: resolvedType.isRejection,
+    isRecognizedTransactionType: resolvedType.isRecognized,
     postDate: parseRtaDate(get("postDate")) ?? (() => {
       throw new Error("Missing required MFSD 201 field: postDate");
     })(),

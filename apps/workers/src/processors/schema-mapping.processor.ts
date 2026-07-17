@@ -43,14 +43,14 @@ export async function processSchemaMapping(job: Job<SchemaMappingJobData>) {
     return { inserted: 0 };
   }
 
-  if (!looksLikeMfsd201(rawRecords[0], sourceFormat)) {
+  if (!looksLikeMfsd201(rawRecords[0], sourceFormat, rtaType)) {
     throw new Error(
       `Unsupported report layout (distributorId=${distributorId}, rtaType=${rtaType}, sourceFormat=${sourceFormat}): ` +
         "does not match any known report definition. Needs LLM schema broker support (not yet implemented).",
     );
   }
 
-  const normalized = rawRecords.map((raw) => mapMfsd201Record(raw, sourceFormat));
+  const normalized = rawRecords.map((raw) => mapMfsd201Record(raw, sourceFormat, rtaType));
 
   const result = await prisma.rtaInsightLedger.createMany({
     data: normalized.map((record) => ({

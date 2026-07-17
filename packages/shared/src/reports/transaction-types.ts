@@ -147,7 +147,8 @@ export type NormalizedTransactionType =
   | "SWITCH_OUT"
   | "BONUS"
   | "DIVIDEND_REINVEST"
-  | "DIVIDEND_PAYOUT";
+  | "DIVIDEND_PAYOUT"
+  | "OTHER";
 
 const FLAG_TO_NORMALIZED: Record<RtaTransactionFlag, NormalizedTransactionType> = {
   P: "PURCHASE",
@@ -164,6 +165,21 @@ export interface ResolvedTransactionType {
   description: string;
   isRejection: boolean;
   normalizedType: NormalizedTransactionType;
+  /**
+   * False when the code wasn't found in RTA_TRANSACTION_TYPES. This table
+   * was built from KFintech's "TRTypes & Flags" reference and matches
+   * KFintech's own TD_TRTYPE values well, but CAMS's native WBR-series DBF
+   * reports use a much larger, scheme/campaign-specific code system (300+
+   * distinct codes seen in one real sample file, e.g. "PSI01S", "SO3",
+   * "DRB3") that doesn't overlap this table at all. Rather than guess a
+   * classification from the code's prefix — which risks silently mis-
+   * counting a redemption as a purchase in AUM/dashboard aggregates —
+   * unrecognized codes resolve to normalizedType "OTHER" with this flag
+   * false, so callers can exclude/flag them instead of trusting a guess.
+   * Building a real CAMS code table needs either CAMS's own documentation
+   * or enough labeled samples to derive one; it hasn't been done yet.
+   */
+  isRecognized: boolean;
 }
 
 /**
@@ -173,14 +189,22 @@ export interface ResolvedTransactionType {
  * valid-transaction aggregates while still keeping them queryable.
  */
 export function resolveTransactionType(code: string): ResolvedTransactionType {
-  const entry = BY_CODE.get(code.toUpperCase().trim());
+  const normalizedCode = code.toUpperCase().trim();
+  const entry = BY_CODE.get(normalizedCode);
   if (!entry) {
-    throw new Error(`Unknown RTA transaction type code: ${code}`);
+    return {
+      code: normalizedCode,
+      description: "Unrecognized transaction type code",
+      isRejection: false,
+      normalizedType: "OTHER",
+      isRecognized: false,
+    };
   }
   return {
     code: entry.code,
     description: entry.description,
     isRejection: entry.mode === "R",
     normalizedType: FLAG_TO_NORMALIZED[entry.flag],
+    isRecognized: true,
   };
 }
