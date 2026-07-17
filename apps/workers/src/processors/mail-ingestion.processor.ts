@@ -1,7 +1,7 @@
 import { Job } from "bullmq";
 
 export interface MailIngestionJobData {
-  mfdId: string;
+  distributorId: string;
   rawMessage: string;
 }
 
@@ -12,6 +12,6 @@ export interface MailIngestionJobData {
  * land here.
  */
 export async function processMailIngestion(job: Job<MailIngestionJobData>) {
-  const { mfdId } = job.data;
-  throw new Error(`processMailIngestion not implemented (mfdId=${mfdId})`);
+  const { distributorId } = job.data;
+  throw new Error(`processMailIngestion not implemented (distributorId=${distributorId})`);
 }

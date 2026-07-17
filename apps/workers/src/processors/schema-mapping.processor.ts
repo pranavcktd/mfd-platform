@@ -1,18 +1,22 @@
 import { Job } from "bullmq";
 
 export interface SchemaMappingJobData {
-  mfdId: string;
+  distributorId: string;
   rtaType: "CAMS" | "KFINTECH";
-  fileContents: string;
+  sourceFormat: "DBF" | "CSV" | "TXT";
+  fileContents: Buffer;
 }
 
 /**
- * Phase 2: sniff the delimiter/header, look up a cached ReportSchemaDefinition
- * by layout fingerprint, or fall back to the LLM schema broker for an
+ * Phase 1: for DBF, read via a dedicated DBF reader; for CSV/TXT, sniff the
+ * delimiter/header. Either way, look up a cached ReportSchemaDefinition by
+ * layout fingerprint, or fall back to the LLM schema broker for an
  * unrecognized layout. Upserts rows into rta_insight_ledger keyed by
  * idempotencyHash. Not yet implemented.
  */
 export async function processSchemaMapping(job: Job<SchemaMappingJobData>) {
-  const { mfdId, rtaType } = job.data;
-  throw new Error(`processSchemaMapping not implemented (mfdId=${mfdId}, rtaType=${rtaType})`);
+  const { distributorId, rtaType, sourceFormat } = job.data;
+  throw new Error(
+    `processSchemaMapping not implemented (distributorId=${distributorId}, rtaType=${rtaType}, sourceFormat=${sourceFormat})`,
+  );
 }

@@ -7,34 +7,87 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-/// A tenant. Every row in every other table is scoped to one Mfd via mfdId —
-/// application code must filter on it in every query (row-level tenant isolation).
-model Mfd {
+/// A tenant: the login account for an MFD business. Every row in every other
+/// table is scoped to one Distributor via distributorId — application code
+/// must filter on it in every query (row-level tenant isolation).
+model Distributor {
   id                String             @id @default(uuid()) @db.Uuid
   name              String
+  email             String             @unique
+  passwordHash      String             @map("password_hash")
   inboundEmailAlias String             @unique @map("inbound_email_alias")
   createdAt         DateTime           @default(now()) @map("created_at")
 
-  rtaCredentials    MfdRtaCredential[]
+  arnProfiles       ArnProfile[]
+  families          Family[]
+  clients           Client[]
+  folios            Folio[]
+  transactions      Transaction[]
   ledgerEntries     RtaInsightLedger[]
 
-  @@map("mfd")
+  @@map("distributors")
 }
 
-/// Per-tenant RTA archive passwords, encrypted at rest with AES-256-GCM
-/// (see CREDENTIAL_ENCRYPTION_KEY). Never store the plaintext password.
-model MfdRtaCredential {
-  id                String   @id @default(uuid()) @db.Uuid
-  mfdId             String   @map("mfd_id") @db.Uuid
-  mfd               Mfd      @relation(fields: [mfdId], references: [id])
-  rtaType           String   @map("rta_type") // 'CAMS' | 'KFINTECH'
-  encryptedPassword String   @map("encrypted_password")
-  encryptionIv      String   @map("encryption_iv")
-  encryptionAuthTag String   @map("encryption_auth_tag")
-  createdAt         DateTime @default(now()) @map("created_at")
+/// One ARN registration under a Distributor login. A distributor can hold a
+/// parent ARN plus multiple child ARNs (sub-brokers/associates operating
+/// under the same dashboard), hence the self-referential hierarchy.
+model ArnProfile {
+  id                 String       @id @default(uuid()) @db.Uuid
+  distributorId      String       @map("distributor_id") @db.Uuid
+  distributor        Distributor  @relation(fields: [distributorId], references: [id])
 
-  @@unique([mfdId, rtaType])
-  @@map("mfd_rta_credentials")
+  parentArnProfileId String?      @map("parent_arn_profile_id") @db.Uuid
+  parentArnProfile   ArnProfile?  @relation("ArnHierarchy", fields: [parentArnProfileId], references: [id])
+  childArnProfiles   ArnProfile[] @relation("ArnHierarchy")
+
+  arnNumber          String       @unique @map("arn_number")
+  arnHolderName      String       @map("arn_holder_name")
+  euinNumber         String?      @map("euin_number")
+  panNumber          String       @map("pan_number")
+  displayName        String       @map("display_name")
+  email              String
+  phone              String
+  address            String?
+  city               String?
+  state              String?
+  pincode            String?
+  camsMailId         String?      @map("cams_mail_id")
+
+  createdAt          DateTime     @default(now()) @map("created_at")
+
+  credentials        ExternalCredential[]
+  folios             Folio[]
+
+  @@index([distributorId])
+  @@map("arn_profiles")
+}
+
+enum ExternalProvider {
+  CAMS
+  KFINTECH
+  BSE
+  NSE
+}
+
+/// Encrypted login vault for RTA (CAMS/KFintech) and exchange (BSE/NSE)
+/// credentials, one row per ArnProfile per provider. encryptedPayload holds
+/// an AES-256-GCM ciphertext of a JSON blob (login id, password, etc.) —
+/// never store any of this in plaintext.
+model ExternalCredential {
+  id                String           @id @default(uuid()) @db.Uuid
+  arnProfileId      String           @map("arn_profile_id") @db.Uuid
+  arnProfile        ArnProfile       @relation(fields: [arnProfileId], references: [id])
+
+  provider          ExternalProvider
+  encryptedPayload  String           @map("encrypted_payload")
+  encryptionIv      String           @map("encryption_iv")
+  encryptionAuthTag String           @map("encryption_auth_tag")
+
+  createdAt         DateTime         @default(now()) @map("created_at")
+  updatedAt         DateTime         @updatedAt @map("updated_at")
+
+  @@unique([arnProfileId, provider])
+  @@map("external_credentials")
 }
 
 /// Cached column-mapping blueprint produced once per unrecognized report
@@ -51,11 +104,12 @@ model ReportSchemaDefinition {
   @@map("report_schema_definitions")
 }
 
-/// Normalized landing zone for every RTA report row, across all 50+ report
-/// types. Explicit columns cover the fields nearly every report shares;
-/// everything else lives in rawStructuredPayload.
+/// Normalized landing zone for every RTA report row (CAMS .dbf, KFintech
+/// .csv, and both RTAs' .txt formats), across all report types. Explicit
+/// columns cover fields nearly every report shares; everything else lives
+/// in rawStructuredPayload.
 ///
-/// idempotencyHash = SHA256(mfdId + folioNumber + transactionDate + schemeCode + amount + units)
+/// idempotencyHash = SHA256(distributorId + folioNumber + transactionDate + schemeCode + amount + units)
 /// enforced unique so re-ingesting an overlapping daily delta is a no-op.
 ///
 /// NOTE: add a GIN index on raw_structured_payload via a follow-up raw SQL
@@ -63,22 +117,110 @@ model ReportSchemaDefinition {
 /// Prisma's declarative index `type` support for Postgres GIN is not used
 /// here to keep the schema portable across Prisma versions.
 model RtaInsightLedger {
-  id                    String    @id @default(uuid()) @db.Uuid
-  mfdId                 String    @map("mfd_id") @db.Uuid
-  mfd                   Mfd       @relation(fields: [mfdId], references: [id])
-  rtaType               String    @map("rta_type")
-  reportCode            String    @map("report_code")
-  uploadedAt            DateTime  @default(now()) @map("uploaded_at")
+  id                    String      @id @default(uuid()) @db.Uuid
+  distributorId         String      @map("distributor_id") @db.Uuid
+  distributor           Distributor @relation(fields: [distributorId], references: [id])
+  rtaType               String      @map("rta_type")
+  reportCode            String      @map("report_code")
+  uploadedAt            DateTime    @default(now()) @map("uploaded_at")
 
-  investorPan           String?   @map("investor_pan")
-  folioNumber           String?   @map("folio_number")
-  amcCode               String?   @map("amc_code")
-  schemeCode            String?   @map("scheme_code")
-  transactionDate        DateTime? @map("transaction_date") @db.Date
+  investorPan           String?     @map("investor_pan")
+  folioNumber           String?     @map("folio_number")
+  amcCode               String?     @map("amc_code")
+  schemeCode            String?     @map("scheme_code")
+  transactionDate        DateTime?  @map("transaction_date") @db.Date
 
-  rawStructuredPayload  Json      @map("raw_structured_payload")
-  idempotencyHash       String    @unique @map("idempotency_hash")
+  rawStructuredPayload  Json        @map("raw_structured_payload")
+  idempotencyHash       String      @unique @map("idempotency_hash")
 
-  @@index([mfdId, investorPan, folioNumber])
+  @@index([distributorId, investorPan, folioNumber])
   @@map("rta_insight_ledger")
+}
+
+/// Groups clients for the "family master" / family-wise reporting views.
+model Family {
+  id             String      @id @default(uuid()) @db.Uuid
+  distributorId  String      @map("distributor_id") @db.Uuid
+  distributor    Distributor @relation(fields: [distributorId], references: [id])
+  familyName     String      @map("family_name")
+  createdAt      DateTime    @default(now()) @map("created_at")
+
+  clients        Client[]
+
+  @@index([distributorId])
+  @@map("families")
+}
+
+/// An investor. Scoped to the Distributor (not a single ArnProfile) since
+/// the same client's folios can span the parent ARN and any child ARNs.
+model Client {
+  id             String      @id @default(uuid()) @db.Uuid
+  distributorId  String      @map("distributor_id") @db.Uuid
+  distributor    Distributor @relation(fields: [distributorId], references: [id])
+
+  familyId       String?     @map("family_id") @db.Uuid
+  family         Family?     @relation(fields: [familyId], references: [id])
+
+  panNumber      String?     @map("pan_number")
+  name           String
+  email          String?
+  phone          String?
+  dateOfBirth    DateTime?   @map("date_of_birth") @db.Date
+  kycStatus      String?     @map("kyc_status")
+
+  createdAt      DateTime    @default(now()) @map("created_at")
+
+  folios         Folio[]
+
+  @@index([distributorId, panNumber])
+  @@map("clients")
+}
+
+/// One client's holding in one scheme. arnProfileId records which ARN the
+/// business is booked under, for brokerage attribution.
+model Folio {
+  id             String      @id @default(uuid()) @db.Uuid
+  distributorId  String      @map("distributor_id") @db.Uuid
+  distributor    Distributor @relation(fields: [distributorId], references: [id])
+
+  arnProfileId   String?     @map("arn_profile_id") @db.Uuid
+  arnProfile     ArnProfile? @relation(fields: [arnProfileId], references: [id])
+
+  clientId       String      @map("client_id") @db.Uuid
+  client         Client      @relation(fields: [clientId], references: [id])
+
+  folioNumber    String      @map("folio_number")
+  amcCode        String      @map("amc_code")
+  schemeCode     String      @map("scheme_code")
+  openDate       DateTime?   @map("open_date") @db.Date
+
+  createdAt      DateTime    @default(now()) @map("created_at")
+
+  transactions   Transaction[]
+
+  @@unique([distributorId, amcCode, folioNumber, schemeCode])
+  @@index([distributorId, clientId])
+  @@map("folios")
+}
+
+/// A purchase/redemption/switch/SIP-installment/dividend event on a folio.
+model Transaction {
+  id              String      @id @default(uuid()) @db.Uuid
+  distributorId   String      @map("distributor_id") @db.Uuid
+  distributor     Distributor @relation(fields: [distributorId], references: [id])
+
+  folioId         String      @map("folio_id") @db.Uuid
+  folio           Folio       @relation(fields: [folioId], references: [id])
+
+  transactionType String      @map("transaction_type")
+  transactionDate DateTime    @map("transaction_date") @db.Date
+  amount          Decimal?    @db.Decimal(18, 2)
+  units           Decimal?    @db.Decimal(18, 4)
+  navPerUnit      Decimal?    @map("nav_per_unit") @db.Decimal(12, 4)
+
+  idempotencyHash String      @unique @map("idempotency_hash")
+  createdAt       DateTime    @default(now()) @map("created_at")
+
+  @@index([distributorId, folioId, transactionDate])
+  @@map("transactions")
 }
