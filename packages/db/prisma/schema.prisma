@@ -172,7 +172,11 @@ model Client {
 
   folios         Folio[]
 
-  @@index([distributorId, panNumber])
+  /// Postgres treats NULLs as distinct for uniqueness purposes, so this only
+  /// enforces one Client per (distributor, PAN) among clients that HAVE a
+  /// PAN — non-PAN clients (see [[mfd_ingestion_engine]] CRM sync notes) can
+  /// have as many rows as needed.
+  @@unique([distributorId, panNumber])
   @@map("clients")
 }
 

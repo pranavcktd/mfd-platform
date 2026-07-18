@@ -10,6 +10,7 @@ import {
 } from "@mfd/shared";
 import { readDbfRecords } from "../parsing/dbf-reader";
 import { readDelimitedRecords } from "../parsing/delimited-reader";
+import { resolveClientAndFolioId, upsertInvestorMasterClientAndFolio } from "../crm-sync";
 
 export interface SchemaMappingJobData {
   distributorId: string;
@@ -35,12 +36,14 @@ function toJsonPayload(record: object) {
 
 /**
  * Phase 1: parses CAMS .dbf / KFintech .csv / either RTA's inception .txt,
- * identifies the report layout, and maps rows into rta_insight_ledger.
- * Known layouts: MFSD201 (transaction), investor master (CAMS WBR9 /
- * KFintech MFSD211), client AUM/balance snapshot (CAMS WBR4 / KFintech
- * MFSD203), SIP/STP registration (CAMS WBR49 / KFintech MFSD243).
- * Anything else falls through to the "unsupported layout" error, which is
- * where the LLM schema broker will eventually take over.
+ * identifies the report layout, and maps rows into rta_insight_ledger (the
+ * raw normalized landing zone, every report type). MFSD201 (transaction)
+ * and investor master (CAMS WBR9 / KFintech MFSD211) additionally sync into
+ * the CRM tables (Client/Folio/Transaction) that the dashboard reads from —
+ * client AUM/balance (WBR4/MFSD203) and SIP registration (WBR49/MFSD243)
+ * are ledger-only for now. Anything unidentified falls through to the
+ * "unsupported layout" error, which is where the LLM schema broker will
+ * eventually take over.
  */
 export async function processSchemaMapping(job: Job<SchemaMappingJobData>) {
   const { distributorId, rtaType, sourceFormat, fileContents } = job.data;
@@ -64,60 +67,110 @@ export async function processSchemaMapping(job: Job<SchemaMappingJobData>) {
 
   switch (reportCode) {
     case "MFSD201": {
-      rows = rawRecords.map((raw) => {
-        const r = mapMfsd201Record(raw, sourceFormat, rtaType);
-        return {
+      const normalized = rawRecords.map((raw) => mapMfsd201Record(raw, sourceFormat, rtaType));
+
+      rows = normalized.map((r) => ({
+        distributorId,
+        rtaType,
+        reportCode,
+        investorPan: r.investorPan,
+        folioNumber: r.folioNumber,
+        amcCode: r.amcCode,
+        schemeCode: r.productCode,
+        transactionDate: r.postDate,
+        rawStructuredPayload: toJsonPayload(r),
+        // Folio+date+scheme+amount+units alone is NOT safe: confirmed against
+        // real data that distinct transactions (e.g. two different investors'
+        // same-amount SIP installments on the same day) can share all five
+        // values. transactionNumber alone isn't safe either — KFintech reuses
+        // transaction numbers years apart, and its "WITH SPLIT" export gives
+        // one transaction number multiple legitimate sub-rows with different
+        // amounts. The combination of all of these together was empirically
+        // validated as collision-free (except for genuine exact duplicates)
+        // across ~145k real transaction rows from both RTAs.
+        idempotencyHash: hash([
           distributorId,
-          rtaType,
-          reportCode,
-          investorPan: r.investorPan,
-          folioNumber: r.folioNumber,
-          amcCode: r.amcCode,
-          schemeCode: r.productCode,
-          transactionDate: r.postDate,
-          rawStructuredPayload: toJsonPayload(r),
-          // Folio+date+scheme+amount+units alone is NOT safe: confirmed against
-          // real data that distinct transactions (e.g. two different investors'
-          // same-amount SIP installments on the same day) can share all five
-          // values. transactionNumber alone isn't safe either — KFintech reuses
-          // transaction numbers years apart, and its "WITH SPLIT" export gives
-          // one transaction number multiple legitimate sub-rows with different
-          // amounts. The combination of all of these together was empirically
-          // validated as collision-free (except for genuine exact duplicates)
-          // across ~145k real transaction rows from both RTAs.
-          idempotencyHash: hash([
+          r.folioNumber,
+          r.transactionNumber,
+          r.postDate.toISOString(),
+          r.productCode,
+          r.amount,
+          r.units,
+        ]),
+      }));
+
+      // Resolve Client+Folio once per unique folio (memoized), not once per
+      // transaction — a folio typically has many transactions, and each
+      // resolution is a DB round trip.
+      const folioCache = new Map<string, Promise<{ clientId: string; folioId: string }>>();
+      const resolveFolio = (r: (typeof normalized)[number]) => {
+        const key = `${r.amcCode}|${r.folioNumber}|${r.productCode}`;
+        let cached = folioCache.get(key);
+        if (!cached) {
+          cached = resolveClientAndFolioId({
             distributorId,
-            r.folioNumber,
-            r.transactionNumber,
-            r.postDate.toISOString(),
-            r.productCode,
-            r.amount,
-            r.units,
-          ]),
-        };
-      });
+            panNumber: r.investorPan,
+            investorName: r.investorName,
+            amcCode: r.amcCode,
+            folioNumber: r.folioNumber,
+            schemeCode: r.productCode,
+          });
+          folioCache.set(key, cached);
+        }
+        return cached;
+      };
+
+      const transactionRows: Prisma.TransactionCreateManyInput[] = [];
+      for (let i = 0; i < normalized.length; i++) {
+        const r = normalized[i];
+        const { folioId } = await resolveFolio(r);
+        transactionRows.push({
+          distributorId,
+          folioId,
+          transactionType: r.transactionType,
+          transactionDate: r.postDate,
+          amount: r.amount,
+          units: r.units,
+          navPerUnit: r.navPerUnit,
+          idempotencyHash: rows[i].idempotencyHash,
+        });
+      }
+      await prisma.transaction.createMany({ data: transactionRows, skipDuplicates: true });
       break;
     }
     case "INVESTOR_MASTER": {
-      rows = rawRecords.map((raw) => {
-        const r = mapInvestorMasterRecord(raw, rtaType);
-        return {
+      const normalized = rawRecords.map((raw) => mapInvestorMasterRecord(raw, rtaType));
+
+      rows = normalized.map((r) => ({
+        distributorId,
+        rtaType,
+        reportCode,
+        investorPan: r.investorPan,
+        folioNumber: r.folioNumber,
+        amcCode: r.amcCode,
+        schemeCode: r.productCode,
+        transactionDate: r.reportDate,
+        rawStructuredPayload: toJsonPayload(r),
+        // folio+PAN+reportDate alone collides: one folio can hold multiple
+        // schemes under the same AMC, producing multiple investor-master
+        // rows for the same folio/PAN/date. productCode disambiguates —
+        // confirmed collision-free against real WBR9/MFSD211 data.
+        idempotencyHash: hash([distributorId, r.folioNumber, r.productCode, r.investorPan, r.reportDate?.toISOString()]),
+      }));
+
+      for (const r of normalized) {
+        await upsertInvestorMasterClientAndFolio({
           distributorId,
-          rtaType,
-          reportCode,
-          investorPan: r.investorPan,
-          folioNumber: r.folioNumber,
+          panNumber: r.investorPan,
+          investorName: r.investorName,
+          email: r.email,
+          mobile: r.mobile,
+          dateOfBirth: r.dateOfBirth,
           amcCode: r.amcCode,
-          schemeCode: r.productCode,
-          transactionDate: r.reportDate,
-          rawStructuredPayload: toJsonPayload(r),
-          // folio+PAN+reportDate alone collides: one folio can hold multiple
-          // schemes under the same AMC, producing multiple investor-master
-          // rows for the same folio/PAN/date. productCode disambiguates —
-          // confirmed collision-free against real WBR9/MFSD211 data.
-          idempotencyHash: hash([distributorId, r.folioNumber, r.productCode, r.investorPan, r.reportDate?.toISOString()]),
-        };
-      });
+          folioNumber: r.folioNumber,
+          productCode: r.productCode,
+        });
+      }
       break;
     }
     case "CLIENT_AUM": {
