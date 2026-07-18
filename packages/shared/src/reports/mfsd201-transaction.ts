@@ -1,5 +1,6 @@
 import { resolveTransactionType } from "./transaction-types";
 import { RtaType } from "../report-schema";
+import { buildHeaderLookup, optionalString, parseRtaDate, parseRtaNumber, requireString } from "./parsing-utils";
 
 export type RtaSourceFormat = "DBF" | "CSV" | "TXT";
 export type { RtaType };
@@ -65,14 +66,6 @@ export interface NormalizedTransactionRecord {
   euin?: string;
 }
 
-function buildHeaderLookup(rawRecord: Record<string, unknown>): Map<string, string> {
-  const lookup = new Map<string, string>();
-  for (const key of Object.keys(rawRecord)) {
-    lookup.set(key.trim().toLowerCase(), key);
-  }
-  return lookup;
-}
-
 function resolveAliasKey(format: RtaSourceFormat, rtaType: RtaType): "dbf" | "cams" | "csv" {
   if (rtaType === "CAMS") {
     return "cams";
@@ -107,56 +100,6 @@ export function looksLikeMfsd201(
   return required.every((field) => getRawValue(rawRecord, headerLookup, field, aliasKey) !== undefined);
 }
 
-function parseRtaDate(value: unknown): Date | undefined {
-  if (value === undefined || value === null || value === "") {
-    return undefined;
-  }
-  if (value instanceof Date) {
-    return value;
-  }
-  const text = String(value).trim();
-  // DD-MMM-YYYY, e.g. 15-JUL-2026
-  const monthNameMatch = text.match(/^(\d{1,2})-([A-Za-z]{3})-(\d{4})$/);
-  if (monthNameMatch) {
-    const [, day, mon, year] = monthNameMatch;
-    const parsed = new Date(`${day} ${mon} ${year} UTC`);
-    if (!Number.isNaN(parsed.getTime())) {
-      return parsed;
-    }
-  }
-  // DD/MM/YYYY or DD-MM-YYYY
-  const numericMatch = text.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
-  if (numericMatch) {
-    const [, day, month, year] = numericMatch;
-    return new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
-  }
-  // YYYYMMDD or YYYY-MM-DD
-  const isoMatch = text.match(/^(\d{4})-?(\d{2})-?(\d{2})$/);
-  if (isoMatch) {
-    const [, year, month, day] = isoMatch;
-    return new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
-  }
-  throw new Error(`Unrecognized date format in RTA file: "${text}"`);
-}
-
-function parseRtaNumber(value: unknown): number | undefined {
-  if (value === undefined || value === null || value === "") {
-    return undefined;
-  }
-  if (typeof value === "number") {
-    return value;
-  }
-  const parsed = Number(String(value).replace(/,/g, "").trim());
-  return Number.isNaN(parsed) ? undefined : parsed;
-}
-
-function requireString(value: unknown, field: string): string {
-  if (value === undefined || value === null || String(value).trim() === "") {
-    throw new Error(`Missing required MFSD 201 field: ${field}`);
-  }
-  return String(value).trim();
-}
-
 export function mapMfsd201Record(
   rawRecord: Record<string, unknown>,
   format: RtaSourceFormat,
@@ -165,31 +108,32 @@ export function mapMfsd201Record(
   const headerLookup = buildHeaderLookup(rawRecord);
   const aliasKey = resolveAliasKey(format, rtaType);
   const get = (field: Mfsd201Field) => getRawValue(rawRecord, headerLookup, field, aliasKey);
+  const reportCode = "MFSD201";
 
-  const transactionTypeCode = requireString(get("transactionTypeCode"), "transactionTypeCode");
+  const transactionTypeCode = requireString(get("transactionTypeCode"), "transactionTypeCode", reportCode);
   const resolvedType = resolveTransactionType(transactionTypeCode);
 
   return {
-    amcCode: requireString(get("amcCode"), "amcCode"),
-    productCode: requireString(get("productCode"), "productCode"),
-    schemeDescription: requireString(get("schemeDescription"), "schemeDescription"),
-    folioNumber: requireString(get("folioNumber"), "folioNumber"),
-    investorName: get("investorName") ? String(get("investorName")).trim() : undefined,
-    investorPan: get("investorPan") ? String(get("investorPan")).trim() : undefined,
-    transactionNumber: get("transactionNumber") ? String(get("transactionNumber")).trim() : undefined,
+    amcCode: requireString(get("amcCode"), "amcCode", reportCode),
+    productCode: requireString(get("productCode"), "productCode", reportCode),
+    schemeDescription: requireString(get("schemeDescription"), "schemeDescription", reportCode),
+    folioNumber: requireString(get("folioNumber"), "folioNumber", reportCode),
+    investorName: optionalString(get("investorName")),
+    investorPan: optionalString(get("investorPan")),
+    transactionNumber: optionalString(get("transactionNumber")),
     transactionTypeCode,
     transactionType: resolvedType.normalizedType,
     isRejection: resolvedType.isRejection,
     isRecognizedTransactionType: resolvedType.isRecognized,
     postDate: parseRtaDate(get("postDate")) ?? (() => {
-      throw new Error("Missing required MFSD 201 field: postDate");
+      throw new Error(`Missing required ${reportCode} field: postDate`);
     })(),
     tradeDate: parseRtaDate(get("tradeDate")),
     units: parseRtaNumber(get("units")),
     amount: parseRtaNumber(get("amount")),
     navPerUnit: parseRtaNumber(get("navPerUnit")),
-    brokerArnCode: get("brokerArnCode") ? String(get("brokerArnCode")).trim() : undefined,
-    subBrokerCode: get("subBrokerCode") ? String(get("subBrokerCode")).trim() : undefined,
-    euin: get("euin") ? String(get("euin")).trim() : undefined,
+    brokerArnCode: optionalString(get("brokerArnCode")),
+    subBrokerCode: optionalString(get("subBrokerCode")),
+    euin: optionalString(get("euin")),
   };
 }
