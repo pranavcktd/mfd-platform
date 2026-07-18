@@ -99,6 +99,10 @@ export const RTA_TRANSACTION_TYPES: RtaTransactionTypeEntry[] = [
   { code: "TRFOR", description: "Demat Transfer Out Rej", mode: "R", flag: "P" },
   { code: "TRMI", description: "Transmission In", mode: "N", flag: "P" },
   { code: "TRMO", description: "Transmission Out", mode: "N", flag: "R" },
+  // TMI/TMO: confirmed present in a real KFintech MFSD201 export as short-form
+  // variants of TRMI/TRMO (same Transmission In/Out semantics).
+  { code: "TMI", description: "Transmission In", mode: "N", flag: "P" },
+  { code: "TMO", description: "Transmission Out", mode: "N", flag: "R" },
   { code: "UPLO", description: "Unpledging", mode: "N", flag: "P" },
   { code: "UPLOR", description: "Unpledging Rejection", mode: "R", flag: "R" },
   { code: "ADDD", description: "Additional Purchase Pre-Rejection", mode: "N", flag: "R" },
@@ -136,6 +140,11 @@ export const RTA_TRANSACTION_TYPES: RtaTransactionTypeEntry[] = [
   { code: "UPLOD", description: "Unpledging rejection", mode: "N", flag: "R" },
   { code: "CNOR", description: "Consolidation Out Rejection", mode: "R", flag: "P" },
   { code: "CNIR", description: "Consolidation IN Rejection", mode: "R", flag: "R" },
+  // "RFD" (Refund) is deliberately NOT listed here. The RTA's own reference
+  // notes say: "we request you not to consider the transaction as it is
+  // pertains to Non commercial Transaction" — so it should fall through to
+  // resolveTransactionType's unrecognized/OTHER path rather than be given a
+  // P/R/SI/SO/etc. classification, which would wrongly count it as real.
 ];
 
 const BY_CODE = new Map(RTA_TRANSACTION_TYPES.map((entry) => [entry.code, entry]));
