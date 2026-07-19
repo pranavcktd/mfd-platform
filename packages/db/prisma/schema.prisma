@@ -23,6 +23,7 @@ model Distributor {
   clients           Client[]
   folios            Folio[]
   transactions      Transaction[]
+  sipRegistrations  SipRegistration[]
   ledgerEntries     RtaInsightLedger[]
 
   @@map("distributors")
@@ -198,13 +199,52 @@ model Folio {
   schemeCode     String      @map("scheme_code")
   openDate       DateTime?   @map("open_date") @db.Date
 
+  /// Latest known balance snapshot (from CAMS WBR4 / KFintech MFSD203), not
+  /// a time series — only overwritten when a newer report's asOfDate is
+  /// more recent than what's stored, so out-of-order ingestion can't
+  /// regress current AUM with stale data. A proper valuation history table
+  /// is a future "Calculated Metrics Cache" concern, not built yet.
+  balanceUnits     Decimal?  @map("balance_units") @db.Decimal(18, 4)
+  valuationAmount  Decimal?  @map("valuation_amount") @db.Decimal(18, 2)
+  navPerUnit       Decimal?  @map("nav_per_unit") @db.Decimal(12, 4)
+  balanceAsOfDate  DateTime? @map("balance_as_of_date") @db.Date
+
   createdAt      DateTime    @default(now()) @map("created_at")
 
-  transactions   Transaction[]
+  transactions      Transaction[]
+  sipRegistrations  SipRegistration[]
 
   @@unique([distributorId, amcCode, folioNumber, schemeCode])
   @@index([distributorId, clientId])
   @@map("folios")
+}
+
+/// A SIP/STP registration on a folio (CAMS WBR49 / KFintech MFSD243).
+/// Immutable event record like Transaction — upserted by idempotencyHash,
+/// never updated in place, since a modified/topped-up SIP shows up as its
+/// own registration row in the source data rather than an edit to this one.
+model SipRegistration {
+  id               String      @id @default(uuid()) @db.Uuid
+  distributorId    String      @map("distributor_id") @db.Uuid
+  distributor      Distributor @relation(fields: [distributorId], references: [id])
+
+  folioId          String      @map("folio_id") @db.Uuid
+  folio            Folio       @relation(fields: [folioId], references: [id])
+
+  schemeCode       String?     @map("scheme_code")
+  sipAmount        Decimal?    @db.Decimal(18, 2)
+  frequency        String?
+  startDate        DateTime?   @map("start_date") @db.Date
+  endDate          DateTime?   @map("end_date") @db.Date
+  registrationDate DateTime    @map("registration_date") @db.Date
+  ceaseDate        DateTime?   @map("cease_date") @db.Date
+  isActive         Boolean     @map("is_active")
+
+  idempotencyHash  String      @unique @map("idempotency_hash")
+  createdAt        DateTime    @default(now()) @map("created_at")
+
+  @@index([distributorId, folioId])
+  @@map("sip_registrations")
 }
 
 /// A purchase/redemption/switch/SIP-installment/dividend event on a folio.

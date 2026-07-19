@@ -10,7 +10,12 @@ import {
 } from "@mfd/shared";
 import { readDbfRecords } from "../parsing/dbf-reader";
 import { readDelimitedRecords } from "../parsing/delimited-reader";
-import { resolveClientAndFolioId, upsertInvestorMasterClientAndFolio } from "../crm-sync";
+import {
+  resolveClientAndFolioId,
+  upsertInvestorMasterClientAndFolio,
+  updateFolioBalance,
+  upsertSipRegistration,
+} from "../crm-sync";
 
 export interface SchemaMappingJobData {
   distributorId: string;
@@ -37,13 +42,14 @@ function toJsonPayload(record: object) {
 /**
  * Phase 1: parses CAMS .dbf / KFintech .csv / either RTA's inception .txt,
  * identifies the report layout, and maps rows into rta_insight_ledger (the
- * raw normalized landing zone, every report type). MFSD201 (transaction)
- * and investor master (CAMS WBR9 / KFintech MFSD211) additionally sync into
- * the CRM tables (Client/Folio/Transaction) that the dashboard reads from —
- * client AUM/balance (WBR4/MFSD203) and SIP registration (WBR49/MFSD243)
- * are ledger-only for now. Anything unidentified falls through to the
- * "unsupported layout" error, which is where the LLM schema broker will
- * eventually take over.
+ * raw normalized landing zone, every report type). All four known report
+ * types additionally sync into the CRM tables the dashboard reads from:
+ * MFSD201 (transaction) -> Transaction, investor master (WBR9/MFSD211) ->
+ * Client/Folio demographic enrichment, client AUM (WBR4/MFSD203) -> Folio's
+ * latest balance snapshot, SIP registration (WBR49/MFSD243) ->
+ * SipRegistration. Anything unidentified falls through to the "unsupported
+ * layout" error, which is where the LLM schema broker will eventually take
+ * over.
  */
 export async function processSchemaMapping(job: Job<SchemaMappingJobData>) {
   const { distributorId, rtaType, sourceFormat, fileContents } = job.data;
@@ -174,53 +180,104 @@ export async function processSchemaMapping(job: Job<SchemaMappingJobData>) {
       break;
     }
     case "CLIENT_AUM": {
-      rows = rawRecords.map((raw) => {
-        const r = mapClientAumRecord(raw, rtaType);
-        return {
+      const normalized = rawRecords.map((raw) => mapClientAumRecord(raw, rtaType));
+
+      rows = normalized.map((r) => ({
+        distributorId,
+        rtaType,
+        reportCode,
+        investorPan: r.investorPan,
+        folioNumber: r.folioNumber,
+        amcCode: r.amcCode,
+        schemeCode: r.productCode,
+        transactionDate: r.reportDate,
+        rawStructuredPayload: toJsonPayload(r),
+        idempotencyHash: hash([distributorId, r.folioNumber, r.productCode, r.reportDate?.toISOString()]),
+      }));
+
+      for (const r of normalized) {
+        if (!r.amcCode || !r.productCode) {
+          continue; // nothing to key a Folio on without amcCode+productCode
+        }
+        const { folioId } = await resolveClientAndFolioId({
           distributorId,
-          rtaType,
-          reportCode,
-          investorPan: r.investorPan,
-          folioNumber: r.folioNumber,
+          panNumber: r.investorPan,
+          investorName: r.investorName,
           amcCode: r.amcCode,
+          folioNumber: r.folioNumber,
           schemeCode: r.productCode,
-          transactionDate: r.reportDate,
-          rawStructuredPayload: toJsonPayload(r),
-          idempotencyHash: hash([distributorId, r.folioNumber, r.productCode, r.reportDate?.toISOString()]),
-        };
-      });
+        });
+        await updateFolioBalance({
+          folioId,
+          balanceUnits: r.balanceUnits,
+          valuationAmount: r.valuationAmount,
+          navPerUnit: r.navPerUnit,
+          asOfDate: r.reportDate,
+        });
+      }
       break;
     }
     case "SIP_REGISTRATION": {
-      rows = rawRecords.map((raw) => {
-        const r = mapSipRegistrationRecord(raw, rtaType);
-        return {
+      const normalized = rawRecords.map((raw) => mapSipRegistrationRecord(raw, rtaType));
+
+      rows = normalized.map((r) => ({
+        distributorId,
+        rtaType,
+        reportCode,
+        investorPan: r.investorPan,
+        folioNumber: r.folioNumber,
+        amcCode: r.amcCode,
+        schemeCode: r.schemeCode,
+        transactionDate: r.registrationDate,
+        rawStructuredPayload: toJsonPayload(r),
+        // folio+scheme+registrationDate alone collides: the same folio/scheme
+        // can carry multiple registration records dated the same day (top-ups,
+        // amendments). Adding startDate/sipAmount/endDate/ceaseDate closed
+        // ~90%+ of collisions against real WBR49/MFSD243 data; the handful
+        // that remain matched on every field checked, i.e. genuine duplicates.
+        idempotencyHash: hash([
           distributorId,
-          rtaType,
-          reportCode,
-          investorPan: r.investorPan,
-          folioNumber: r.folioNumber,
+          r.folioNumber,
+          r.schemeCode,
+          r.registrationDate.toISOString(),
+          r.startDate?.toISOString(),
+          r.endDate?.toISOString(),
+          r.ceaseDate?.toISOString(),
+          r.sipAmount,
+        ]),
+      }));
+
+      for (let i = 0; i < normalized.length; i++) {
+        const r = normalized[i];
+        if (!r.amcCode || !r.productCode) {
+          continue; // nothing to key a Folio on without amcCode+productCode
+        }
+        // Folio's schemeCode column is the full product code (matches the
+        // convention used everywhere else — MFSD201/investor-master), not
+        // this report's abbreviated "Scheme" field, which is only kept on
+        // the SipRegistration row itself.
+        const { folioId } = await resolveClientAndFolioId({
+          distributorId,
+          panNumber: r.investorPan,
+          investorName: r.investorName,
           amcCode: r.amcCode,
+          folioNumber: r.folioNumber,
+          schemeCode: r.productCode,
+        });
+        await upsertSipRegistration({
+          distributorId,
+          folioId,
           schemeCode: r.schemeCode,
-          transactionDate: r.registrationDate,
-          rawStructuredPayload: toJsonPayload(r),
-          // folio+scheme+registrationDate alone collides: the same folio/scheme
-          // can carry multiple registration records dated the same day (top-ups,
-          // amendments). Adding startDate/sipAmount/endDate/ceaseDate closed
-          // ~90%+ of collisions against real WBR49/MFSD243 data; the handful
-          // that remain matched on every field checked, i.e. genuine duplicates.
-          idempotencyHash: hash([
-            distributorId,
-            r.folioNumber,
-            r.schemeCode,
-            r.registrationDate.toISOString(),
-            r.startDate?.toISOString(),
-            r.endDate?.toISOString(),
-            r.ceaseDate?.toISOString(),
-            r.sipAmount,
-          ]),
-        };
-      });
+          sipAmount: r.sipAmount,
+          frequency: r.frequency,
+          startDate: r.startDate,
+          endDate: r.endDate,
+          registrationDate: r.registrationDate,
+          ceaseDate: r.ceaseDate,
+          isActive: r.isActive,
+          idempotencyHash: rows[i].idempotencyHash,
+        });
+      }
       break;
     }
   }

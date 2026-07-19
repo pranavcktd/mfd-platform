@@ -142,3 +142,60 @@ export async function upsertInvestorMasterClientAndFolio(
   const client = await prisma.client.create({ data: { distributorId, ...clientData } });
   return { clientId: client.id, folioId: null };
 }
+
+interface FolioBalanceParams {
+  folioId: string;
+  balanceUnits?: number;
+  valuationAmount?: number;
+  navPerUnit?: number;
+  asOfDate?: Date;
+}
+
+/**
+ * Updates a Folio's latest-known balance snapshot, but only if the new
+ * data is actually newer than what's stored — otherwise an out-of-order or
+ * re-run ingestion (e.g. reprocessing an older backfill file after a fresh
+ * daily one already landed) would regress current AUM with stale numbers.
+ * Silently no-ops without an asOfDate, since there's nothing to compare.
+ */
+export async function updateFolioBalance(params: FolioBalanceParams): Promise<void> {
+  const { folioId, balanceUnits, valuationAmount, navPerUnit, asOfDate } = params;
+  if (!asOfDate) {
+    return;
+  }
+  const folio = await prisma.folio.findUniqueOrThrow({
+    where: { id: folioId },
+    select: { balanceAsOfDate: true },
+  });
+  if (folio.balanceAsOfDate && folio.balanceAsOfDate >= asOfDate) {
+    return;
+  }
+  await prisma.folio.update({
+    where: { id: folioId },
+    data: { balanceUnits, valuationAmount, navPerUnit, balanceAsOfDate: asOfDate },
+  });
+}
+
+interface SipRegistrationParams {
+  distributorId: string;
+  folioId: string;
+  schemeCode?: string;
+  sipAmount?: number;
+  frequency?: string;
+  startDate?: Date;
+  endDate?: Date;
+  registrationDate: Date;
+  ceaseDate?: Date;
+  isActive: boolean;
+  idempotencyHash: string;
+}
+
+/** Immutable event record, same pattern as Transaction — upsert by idempotencyHash, never mutate an existing row. */
+export async function upsertSipRegistration(params: SipRegistrationParams): Promise<void> {
+  const { idempotencyHash, ...data } = params;
+  await prisma.sipRegistration.upsert({
+    where: { idempotencyHash },
+    create: { idempotencyHash, ...data },
+    update: {},
+  });
+}
