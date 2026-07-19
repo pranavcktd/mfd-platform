@@ -12,17 +12,25 @@ export class CreateArnProfileDto {
   @IsString()
   euinNumber?: string;
 
+  // PAN/displayName/email/phone are marked "*" on the onboarding form, but
+  // per the actual business requirement that means NOT mandatory (opposite
+  // of the usual asterisk convention) — child ARN onboarding routinely
+  // omits all four.
+  @IsOptional()
   @IsString()
-  panNumber!: string;
+  panNumber?: string;
 
+  @IsOptional()
   @IsString()
-  displayName!: string;
+  displayName?: string;
 
+  @IsOptional()
   @IsEmail()
-  email!: string;
+  email?: string;
 
+  @IsOptional()
   @IsString()
-  phone!: string;
+  phone?: string;
 
   @IsOptional()
   @IsString()
@@ -43,6 +51,10 @@ export class CreateArnProfileDto {
   @IsOptional()
   @IsEmail()
   camsMailId?: string;
+
+  @IsOptional()
+  @IsString()
+  gstNumber?: string;
 }
 
 export class CreateDistributorDto {

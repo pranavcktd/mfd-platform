@@ -16,7 +16,7 @@ export class AdminService {
     const distributor = await prisma.distributor.create({
       data: {
         name: dto.name,
-        email: dto.email,
+        email: dto.email.toLowerCase(),
         passwordHash,
         inboundEmailAlias: `inbound-ingest-${randomUUID()}@${inboundMailDomain}`,
         arnProfiles: {

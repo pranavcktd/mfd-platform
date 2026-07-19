@@ -44,15 +44,20 @@ model ArnProfile {
   arnNumber          String       @unique @map("arn_number")
   arnHolderName      String       @map("arn_holder_name")
   euinNumber         String?      @map("euin_number")
-  panNumber          String       @map("pan_number")
-  displayName        String       @map("display_name")
-  email              String
-  phone              String
+  /// Marked "*" on the onboarding form, but per the actual business
+  /// requirement that asterisk means NOT mandatory (opposite of the usual
+  /// convention) — PAN, email, and phone are all optional, and child ARN
+  /// onboarding routinely omits them entirely.
+  panNumber          String?      @map("pan_number")
+  displayName        String?      @map("display_name")
+  email              String?
+  phone              String?
   address            String?
   city               String?
   state              String?
   pincode            String?
   camsMailId         String?      @map("cams_mail_id")
+  gstNumber          String?      @map("gst_number")
 
   createdAt          DateTime     @default(now()) @map("created_at")
 

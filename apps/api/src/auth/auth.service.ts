@@ -10,7 +10,7 @@ export class AuthService {
   constructor(private readonly jwtService: JwtService) {}
 
   async login(email: string, password: string): Promise<{ accessToken: string }> {
-    const distributor = await prisma.distributor.findUnique({ where: { email } });
+    const distributor = await prisma.distributor.findUnique({ where: { email: email.toLowerCase() } });
     if (!distributor || !(await bcrypt.compare(password, distributor.passwordHash))) {
       throw new UnauthorizedException("Invalid credentials");
     }

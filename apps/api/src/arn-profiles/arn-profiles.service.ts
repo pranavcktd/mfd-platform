@@ -7,7 +7,10 @@ import { SaveCredentialDto } from "./dto/save-credential.dto";
 export class ArnProfilesService {
   async listForDistributor(distributorId: string) {
     const arnProfiles = await prisma.arnProfile.findMany({ where: { distributorId } });
-    return arnProfiles.map((profile) => ({ ...profile, panNumber: maskPan(profile.panNumber) }));
+    return arnProfiles.map((profile) => ({
+      ...profile,
+      panNumber: profile.panNumber ? maskPan(profile.panNumber) : null,
+    }));
   }
 
   async saveCredential(distributorId: string, arnProfileId: string, dto: SaveCredentialDto) {
