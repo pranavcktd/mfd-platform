@@ -237,6 +237,14 @@ model SipRegistration {
   folio            Folio       @relation(fields: [folioId], references: [id])
 
   schemeCode       String?     @map("scheme_code")
+  // NOTE: missing @map("sip_amount") — inconsistent with the snake_case
+  // convention everywhere else, so the real Postgres column is the
+  // camelCase "sipAmount" (needs double-quoting in raw SQL). Left as-is
+  // deliberately: fixing it now would need `db push` to rename the column,
+  // and `db push` doesn't do safe renames — it can drop-and-recreate,
+  // which would lose the real production data already loaded into this
+  // table. Fix via an explicit `ALTER TABLE ... RENAME COLUMN` migration
+  // if this is ever revisited, not another db push.
   sipAmount        Decimal?    @db.Decimal(18, 2)
   frequency        String?
   startDate        DateTime?   @map("start_date") @db.Date

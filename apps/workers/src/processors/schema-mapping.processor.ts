@@ -16,12 +16,21 @@ import {
   updateFolioBalance,
   upsertSipRegistration,
 } from "../crm-sync";
+import { resolveTenantFromRecords } from "../tenant-resolution";
 
 export interface SchemaMappingJobData {
-  distributorId: string;
   rtaType: "CAMS" | "KFINTECH";
   sourceFormat: "DBF" | "CSV" | "TXT";
   fileContents: Buffer;
+  /**
+   * Optional cross-check from mail-ingestion (e.g. matched via the original
+   * recipient header against ArnProfile.camsMailId). If present, it must
+   * agree with the distributor resolved from the ARN code embedded in the
+   * data itself — a mismatch is a routing error, not something to silently
+   * trust from either side. Not yet populated: mail-ingestion is still a
+   * stub, pending a decision on Gmail access method.
+   */
+  expectedDistributorId?: string;
 }
 
 type LedgerRow = Prisma.RtaInsightLedgerCreateManyInput;
@@ -39,6 +48,20 @@ function toJsonPayload(record: object) {
   );
 }
 
+async function resolveDistributorId(
+  records: Array<{ brokerArnCode?: string }>,
+  expectedDistributorId: string | undefined,
+): Promise<string> {
+  const tenant = await resolveTenantFromRecords(records);
+  if (expectedDistributorId && expectedDistributorId !== tenant.distributorId) {
+    throw new Error(
+      `Tenant mismatch: mail-routing expected distributorId=${expectedDistributorId} but the ARN code in the ` +
+        `data resolves to distributorId=${tenant.distributorId} (arnProfileId=${tenant.arnProfileId})`,
+    );
+  }
+  return tenant.distributorId;
+}
+
 /**
  * Phase 1: parses CAMS .dbf / KFintech .csv / either RTA's inception .txt,
  * identifies the report layout, and maps rows into rta_insight_ledger (the
@@ -50,9 +73,13 @@ function toJsonPayload(record: object) {
  * SipRegistration. Anything unidentified falls through to the "unsupported
  * layout" error, which is where the LLM schema broker will eventually take
  * over.
+ *
+ * Which distributor this data belongs to is resolved from the broker ARN
+ * code embedded in the report rows themselves (see tenant-resolution.ts),
+ * not supplied by the caller — multi-tenant routing lives here, not upstream.
  */
 export async function processSchemaMapping(job: Job<SchemaMappingJobData>) {
-  const { distributorId, rtaType, sourceFormat, fileContents } = job.data;
+  const { rtaType, sourceFormat, fileContents, expectedDistributorId } = job.data;
 
   const rawRecords =
     sourceFormat === "DBF" ? await readDbfRecords(fileContents) : readDelimitedRecords(fileContents);
@@ -64,7 +91,7 @@ export async function processSchemaMapping(job: Job<SchemaMappingJobData>) {
   const reportCode = identifyReport(rawRecords[0], sourceFormat, rtaType);
   if (!reportCode) {
     throw new Error(
-      `Unsupported report layout (distributorId=${distributorId}, rtaType=${rtaType}, sourceFormat=${sourceFormat}): ` +
+      `Unsupported report layout (rtaType=${rtaType}, sourceFormat=${sourceFormat}): ` +
         "does not match any known report definition. Needs LLM schema broker support (not yet implemented).",
     );
   }
@@ -74,6 +101,7 @@ export async function processSchemaMapping(job: Job<SchemaMappingJobData>) {
   switch (reportCode) {
     case "MFSD201": {
       const normalized = rawRecords.map((raw) => mapMfsd201Record(raw, sourceFormat, rtaType));
+      const distributorId = await resolveDistributorId(normalized, expectedDistributorId);
 
       rows = normalized.map((r) => ({
         distributorId,
@@ -146,6 +174,7 @@ export async function processSchemaMapping(job: Job<SchemaMappingJobData>) {
     }
     case "INVESTOR_MASTER": {
       const normalized = rawRecords.map((raw) => mapInvestorMasterRecord(raw, rtaType));
+      const distributorId = await resolveDistributorId(normalized, expectedDistributorId);
 
       rows = normalized.map((r) => ({
         distributorId,
@@ -181,6 +210,7 @@ export async function processSchemaMapping(job: Job<SchemaMappingJobData>) {
     }
     case "CLIENT_AUM": {
       const normalized = rawRecords.map((raw) => mapClientAumRecord(raw, rtaType));
+      const distributorId = await resolveDistributorId(normalized, expectedDistributorId);
 
       rows = normalized.map((r) => ({
         distributorId,
@@ -219,6 +249,7 @@ export async function processSchemaMapping(job: Job<SchemaMappingJobData>) {
     }
     case "SIP_REGISTRATION": {
       const normalized = rawRecords.map((raw) => mapSipRegistrationRecord(raw, rtaType));
+      const distributorId = await resolveDistributorId(normalized, expectedDistributorId);
 
       rows = normalized.map((r) => ({
         distributorId,
