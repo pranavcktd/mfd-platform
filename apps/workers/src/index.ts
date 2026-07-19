@@ -1,3 +1,11 @@
+import { config } from "dotenv";
+import { resolve } from "node:path";
+// Must run before any processor import — schema-mapping.processor.ts pulls
+// in @mfd/db, which constructs PrismaClient at module-load time and needs
+// DATABASE_URL already in process.env. Root .env is 3 levels up from
+// apps/workers/src.
+config({ path: resolve(__dirname, "../../../.env") });
+
 import { Worker } from "bullmq";
 import { createRedisConnection } from "./redis-connection";
 import { QueueNames } from "./queues/queue-names";

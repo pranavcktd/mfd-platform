@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
-    "build": "esbuild src/index.ts --bundle --platform=node --target=node20 --outfile=dist/index.js --external:bullmq --external:ioredis --external:@prisma/client --external:dbffile",
+    "build": "esbuild src/index.ts --bundle --platform=node --target=node20 --outfile=dist/index.js --external:bullmq --external:ioredis --external:@prisma/client --external:dbffile --external:dotenv",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit"
   },
@@ -14,6 +14,7 @@
     "bullmq": "^5.12.0",
     "csv-parse": "^5.5.6",
     "dbffile": "^1.12.0",
+    "dotenv": "^17.4.2",
     "ioredis": "^5.4.1"
   },
   "devDependencies": {

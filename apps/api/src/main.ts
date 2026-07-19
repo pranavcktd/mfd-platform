@@ -1,3 +1,13 @@
+import { config } from "dotenv";
+import { resolve } from "node:path";
+// Must run before AppModule (and its transitive @mfd/db import, which
+// constructs PrismaClient at module-load time) is imported below — the
+// monorepo root .env is 3 levels up from apps/api/src. @nestjs/config's
+// ConfigModule.forRoot() loads .env too, but only once AppModule's own
+// decorator body runs, which is after AppModule's imports (including
+// @mfd/db) have already been evaluated — too late for Prisma.
+config({ path: resolve(__dirname, "../../../.env") });
+
 import "reflect-metadata";
 import { NestFactory } from "@nestjs/core";
 import { ValidationPipe } from "@nestjs/common";
