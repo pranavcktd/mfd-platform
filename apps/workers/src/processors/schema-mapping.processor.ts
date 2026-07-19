@@ -21,14 +21,22 @@ import { resolveTenantFromRecords } from "../tenant-resolution";
 export interface SchemaMappingJobData {
   rtaType: "CAMS" | "KFINTECH";
   sourceFormat: "DBF" | "CSV" | "TXT";
-  fileContents: Buffer;
   /**
-   * Optional cross-check from mail-ingestion (e.g. matched via the original
+   * Base64-encoded, NOT a raw Buffer — confirmed the hard way: BullMQ job
+   * data round-trips through Redis as JSON, which does not preserve Buffer
+   * instances. A Buffer serializes to {type:"Buffer",data:[...]} and comes
+   * back on the worker side as a plain object, not a Buffer — silently
+   * breaking anything that calls .toString() on it (delimiter sniffing saw
+   * "[object Object]" instead of real CSV text). Always base64 across this
+   * boundary; decode immediately inside the handler.
+   */
+  fileContents: string;
+  /**
+   * Optional cross-check from mail-ingestion (matched via the original
    * recipient header against ArnProfile.camsMailId). If present, it must
    * agree with the distributor resolved from the ARN code embedded in the
    * data itself — a mismatch is a routing error, not something to silently
-   * trust from either side. Not yet populated: mail-ingestion is still a
-   * stub, pending a decision on Gmail access method.
+   * trust from either side.
    */
   expectedDistributorId?: string;
 }
@@ -79,7 +87,8 @@ async function resolveDistributorId(
  * not supplied by the caller — multi-tenant routing lives here, not upstream.
  */
 export async function processSchemaMapping(job: Job<SchemaMappingJobData>) {
-  const { rtaType, sourceFormat, fileContents, expectedDistributorId } = job.data;
+  const { rtaType, sourceFormat, expectedDistributorId } = job.data;
+  const fileContents = Buffer.from(job.data.fileContents, "base64");
 
   const rawRecords =
     sourceFormat === "DBF" ? await readDbfRecords(fileContents) : readDelimitedRecords(fileContents);

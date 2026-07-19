@@ -113,7 +113,8 @@ export async function processArchiveDecryption(job: Job<ArchiveDecryptionJobData
   await schemaMappingQueue().add("schema-mapping", {
     rtaType,
     sourceFormat: decrypted.sourceFormat,
-    fileContents: decrypted.fileContents,
+    // Base64, not the raw Buffer — see the field comment on SchemaMappingJobData.
+    fileContents: decrypted.fileContents.toString("base64"),
     expectedDistributorId: expectedDistributorId ?? decrypted.candidateDistributorId,
   });
 

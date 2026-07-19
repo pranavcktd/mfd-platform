@@ -29,6 +29,10 @@ for (const worker of workers) {
     // eslint-disable-next-line no-console
     console.error(`[${worker.name}] job ${job?.id} failed:`, err.message);
   });
+  worker.on("completed", (job) => {
+    // eslint-disable-next-line no-console
+    console.log(`[${worker.name}] job ${job.id} completed:`, JSON.stringify(job.returnvalue));
+  });
 }
 
 // Twice-daily mail poll (morning + evening, default 8am/6pm) — configurable
