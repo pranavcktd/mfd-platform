@@ -4,20 +4,25 @@
   "private": true,
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
-    "build": "esbuild src/index.ts --bundle --platform=node --target=node20 --outfile=dist/index.js --external:bullmq --external:ioredis --external:@prisma/client --external:dbffile --external:dotenv",
+    "build": "esbuild src/index.ts --bundle --platform=node --target=node20 --outfile=dist/index.js --external:bullmq --external:ioredis --external:@prisma/client --external:dbffile --external:dotenv --external:adm-zip --external:imapflow --external:mailparser",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@mfd/db": "0.1.0",
     "@mfd/shared": "0.1.0",
+    "adm-zip": "^0.6.0",
     "bullmq": "^5.12.0",
     "csv-parse": "^5.5.6",
     "dbffile": "^1.12.0",
     "dotenv": "^17.4.2",
-    "ioredis": "^5.4.1"
+    "imapflow": "^1.4.7",
+    "ioredis": "^5.4.1",
+    "mailparser": "^3.9.14"
   },
   "devDependencies": {
+    "@types/adm-zip": "^0.5.8",
+    "@types/mailparser": "^3.4.6",
     "@types/node": "^20.14.15",
     "esbuild": "^0.23.1",
     "ts-node-dev": "^2.0.0",

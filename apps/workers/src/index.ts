@@ -9,6 +9,7 @@ config({ path: resolve(__dirname, "../../../.env") });
 import { Worker } from "bullmq";
 import { createRedisConnection } from "./redis-connection";
 import { QueueNames } from "./queues/queue-names";
+import { mailIngestionQueue } from "./queues/queue-producers";
 import { processMailIngestion } from "./processors/mail-ingestion.processor";
 import { processArchiveDecryption } from "./processors/archive-decryption.processor";
 import { processSchemaMapping } from "./processors/schema-mapping.processor";
@@ -30,8 +31,18 @@ for (const worker of workers) {
   });
 }
 
+// Twice-daily mail poll (morning + evening, default 8am/6pm) — configurable
+// via env since "morning and evening" is a business preference, not a
+// technical constant. addJobScheduler is idempotent by schedulerId, so
+// restarting the worker process doesn't create duplicate schedules.
+const MAIL_POLL_CRON = process.env.MAIL_POLL_CRON ?? "0 8,18 * * *";
+mailIngestionQueue().upsertJobScheduler("mail-poll-schedule", { pattern: MAIL_POLL_CRON }, { name: "mail-poll" }).catch((err) => {
+  // eslint-disable-next-line no-console
+  console.error("[workers] failed to register mail poll schedule:", err);
+});
+
 // eslint-disable-next-line no-console
-console.log(`[workers] started: ${workers.map((w) => w.name).join(", ")}`);
+console.log(`[workers] started: ${workers.map((w) => w.name).join(", ")}, mail poll cron: ${MAIL_POLL_CRON}`);
 
 process.on("SIGTERM", async () => {
   await Promise.all(workers.map((w) => w.close()));
