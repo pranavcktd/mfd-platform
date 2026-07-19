@@ -5,9 +5,41 @@ const SENDER_DOMAINS: Record<RtaSender, string> = {
   KFINTECH: "kfintech.com",
 };
 
+/**
+ * Deliberately narrow, confirmed against real inbox mail — not just "any
+ * link on the RTA's domain":
+ *  - CAMS: a generic "NAV Applicability" info-page link
+ *    (www.camsonline.com/Investors/...) appears in the footer of EVERY
+ *    CAMS mailback email, including "no data" ones. The real report link
+ *    is always on a "mailbackNN.camsonline.com/mailback_result/" host —
+ *    matching that specifically means a "no data" email (which genuinely
+ *    has no such link, confirmed via its "DownloadURL NA" / "Request
+ *    Status No Data" body text) naturally yields no match, with no need
+ *    for separate no-data text detection.
+ *  - KFintech: the HTML body's FIRST kfintech.com link is a plain
+ *    reference to the mfs.kfintech.com portal (e.g. "on mfs.kfintech.com.
+ *    Click Here to download") — matching that would grab the wrong link
+ *    entirely. The actual download is always a
+ *    "scdelivery.kfintech.com/c/?u=...&p=..." click-tracking redirect
+ *    (Salesforce Marketing Cloud), which resolves to the real file when
+ *    fetched — matching that host specifically avoids the portal link.
+ */
 const LINK_PATTERNS: Record<RtaSender, RegExp> = {
-  CAMS: /https:\/\/([a-zA-Z0-9.-]+\.)?camsonline\.com\/[^\s"'<>]+/gi,
-  KFINTECH: /https:\/\/([a-zA-Z0-9.-]+\.)?kfintech\.com\/[^\s"'<>]+/gi,
+  CAMS: /https:\/\/mailback\d*\.camsonline\.com\/mailback_result\/[^\s"'<>\]]+/gi,
+  KFINTECH: /https:\/\/scdelivery\.kfintech\.com\/c\/[^\s"'<>\]]+/gi,
+};
+
+/**
+ * Which body part to check first, per RTA — confirmed against real mail,
+ * not assumed: CAMS's plain-text body has the real DownloadURL directly
+ * and reliably. KFintech's plain-text body is broken — its tracking-link
+ * parameter renders as the literal string "undefined" in the text
+ * alternative (a template-substitution bug on KFintech's side); only the
+ * HTML body's <a href> has the real, fully-populated link.
+ */
+const BODY_PRIORITY: Record<RtaSender, Array<"text" | "html">> = {
+  CAMS: ["text", "html"],
+  KFINTECH: ["html", "text"],
 };
 
 /** Identifies which RTA sent an email, from its From: address. Returns null for anything else — mail-ingestion should skip those. */
@@ -21,16 +53,21 @@ export function identifyRtaSender(fromAddress: string): RtaSender | null {
   return null;
 }
 
-/** Extracts the first RTA secure-download link from the email body (checks both text and HTML forms — a link may only appear inside an href). */
+/** Extracts the RTA secure-download link from the email body, checking text/HTML in the RTA-specific reliable order. Returns null for "no data" emails (CAMS) or anything without a real report link. */
 export function extractDownloadLink(rta: RtaSender, bodyText: string, bodyHtml?: string): string | null {
   const pattern = LINK_PATTERNS[rta];
-  const fromText = bodyText.match(pattern)?.[0];
-  if (fromText) {
-    return fromText;
-  }
-  if (bodyHtml) {
+  const bodies: Record<"text" | "html", string | undefined> = { text: bodyText, html: bodyHtml };
+
+  for (const part of BODY_PRIORITY[rta]) {
+    const body = bodies[part];
+    if (!body) {
+      continue;
+    }
     pattern.lastIndex = 0;
-    return bodyHtml.match(pattern)?.[0] ?? null;
+    const match = body.match(pattern)?.[0];
+    if (match) {
+      return match;
+    }
   }
   return null;
 }
