@@ -64,23 +64,76 @@ export async function processMailIngestion(_job: Job<MailIngestionJobData>) {
   let enqueued = 0;
   let skipped = 0;
 
+  // ImapFlow emits socket/protocol failures as an 'error' event on itself
+  // (a plain EventEmitter), not just as promise rejections. Node crashes the
+  // whole process on an unhandled 'error' event with no listener attached —
+  // confirmed live: a socket timeout mid-poll took down the entire workers
+  // process (all 4 queues), not just this job. This listener converts it
+  // into a normal caught error instead.
+  client.on("error", (err) => {
+    // eslint-disable-next-line no-console
+    console.error("[mail-ingestion] IMAP client error:", err);
+  });
+
   await client.connect();
   try {
     const lock = await client.getMailboxLock("INBOX");
     try {
-      for await (const message of client.fetch({ seen: false }, { source: true, envelope: true, uid: true })) {
+      // Two-phase fetch. envelope-only is a lightweight, header-only IMAP
+      // FETCH — safe to run over the whole unseen backlog every poll,
+      // however large. Fetching {source: true} for every unseen message
+      // up front (the original approach) pulls the full RFC822 body,
+      // attachments included, for every message regardless of sender —
+      // confirmed live against the real shared inbox (508 unseen messages
+      // at the time, nearly all unrelated newsletters/notifications): that
+      // approach reliably hit ImapFlow's socketTimeout (default 300s of
+      // socket idle) partway through and killed the job. Non-RTA senders
+      // are also intentionally left \Seen=false here (only the cheap
+      // envelope scan touches them), so this stays safe to re-run on every
+      // poll without the backlog compounding.
+      const candidates: Array<{ uid: number; rta: "CAMS" | "KFINTECH"; fromAddress: string; subject?: string; receivedAt?: Date }> = [];
+      for await (const message of client.fetch({ seen: false }, { envelope: true, uid: true })) {
         const fromAddress = message.envelope?.from?.[0]?.address ?? "";
         const rta = identifyRtaSender(fromAddress);
-        if (!rta || !message.source) {
+        if (!rta) {
           skipped++;
           continue;
         }
+        candidates.push({
+          uid: message.uid,
+          rta,
+          fromAddress,
+          subject: message.envelope?.subject ?? undefined,
+          receivedAt: message.envelope?.date ?? undefined,
+        });
+      }
+
+      for (const candidate of candidates) {
+        // One admin-visible log row per RTA email seen, regardless of
+        // whether it turns out to carry a real report link — "no data"
+        // mails and stray notifications from the same sender still show up
+        // in the admin audit view rather than silently vanishing.
+        const mailLog = await prisma.mailIngestionLog.create({
+          data: {
+            rtaType: candidate.rta,
+            fromAddress: candidate.fromAddress,
+            subject: candidate.subject,
+            receivedAt: candidate.receivedAt,
+            status: "NO_LINK",
+          },
+        });
 
         try {
-          const parsed = await simpleParser(message.source);
+          const full = await client.fetchOne(String(candidate.uid), { source: true }, { uid: true });
+          if (!full || !full.source) {
+            skipped++;
+            continue;
+          }
+
+          const parsed = await simpleParser(full.source);
           const bodyText = parsed.text ?? "";
           const bodyHtml = typeof parsed.html === "string" ? parsed.html : undefined;
-          const downloadUrl = extractDownloadLink(rta, bodyText, bodyHtml);
+          const downloadUrl = extractDownloadLink(candidate.rta, bodyText, bodyHtml);
           if (!downloadUrl) {
             skipped++;
             continue;
@@ -91,17 +144,35 @@ export async function processMailIngestion(_job: Job<MailIngestionJobData>) {
             .filter((a): a is string => Boolean(a));
           const expectedDistributorId = await matchRecipientToDistributor(toAddresses);
 
-          await archiveDecryptionQueue().add("archive-decryption", { downloadUrl, rtaType: rta, expectedDistributorId });
+          await prisma.mailIngestionLog.update({
+            where: { id: mailLog.id },
+            data: { downloadUrl, status: "ENQUEUED", distributorId: expectedDistributorId },
+          });
+          await archiveDecryptionQueue().add("archive-decryption", {
+            downloadUrl,
+            rtaType: candidate.rta,
+            expectedDistributorId,
+            mailLogId: mailLog.id,
+          });
           enqueued++;
         } finally {
-          await client.messageFlagsAdd(message.uid, ["\\Seen"], { uid: true });
+          await client.messageFlagsAdd(candidate.uid, ["\\Seen"], { uid: true });
         }
       }
     } finally {
-      lock.release();
+      try {
+        lock.release();
+      } catch {
+        // connection may already be dead (e.g. the socket-timeout case above) — nothing to clean up
+      }
     }
   } finally {
-    await client.logout();
+    try {
+      await client.logout();
+    } catch {
+      // same as above: a dead connection can't be logged out of gracefully, and the
+      // original error (if any) from the try block is what actually matters here
+    }
   }
 
   return { enqueued, skipped };

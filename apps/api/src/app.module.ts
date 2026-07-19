@@ -6,6 +6,7 @@ import { AuthModule } from "./auth/auth.module";
 import { AdminModule } from "./admin/admin.module";
 import { ArnProfilesModule } from "./arn-profiles/arn-profiles.module";
 import { ProfileModule } from "./profile/profile.module";
+import { MailModule } from "./mail/mail.module";
 
 @Module({
   imports: [
@@ -14,6 +15,7 @@ import { ProfileModule } from "./profile/profile.module";
     AdminModule,
     ArnProfilesModule,
     ProfileModule,
+    MailModule,
   ],
   controllers: [HealthController],
   providers: [TenantMiddleware],

@@ -1,6 +1,6 @@
 import { Queue } from "bullmq";
 import { createRedisConnection } from "../redis-connection";
-import { QueueNames } from "./queue-names";
+import { QueueNames } from "@mfd/shared";
 import type { MailIngestionJobData } from "../processors/mail-ingestion.processor";
 import type { ArchiveDecryptionJobData } from "../processors/archive-decryption.processor";
 import type { SchemaMappingJobData } from "../processors/schema-mapping.processor";

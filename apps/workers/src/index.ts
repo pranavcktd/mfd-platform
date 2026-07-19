@@ -8,7 +8,7 @@ config({ path: resolve(__dirname, "../../../.env") });
 
 import { Worker } from "bullmq";
 import { createRedisConnection } from "./redis-connection";
-import { QueueNames } from "./queues/queue-names";
+import { QueueNames } from "@mfd/shared";
 import { mailIngestionQueue } from "./queues/queue-producers";
 import { processMailIngestion } from "./processors/mail-ingestion.processor";
 import { processArchiveDecryption } from "./processors/archive-decryption.processor";

@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/main.ts",
-    "build": "esbuild src/main.ts --bundle --platform=node --target=node20 --outfile=dist/main.js --external:@nestjs/common --external:@nestjs/config --external:@nestjs/core --external:@nestjs/jwt --external:@nestjs/platform-express --external:@nestjs/microservices --external:@nestjs/websockets --external:@prisma/client --external:bcryptjs --external:class-transformer --external:class-validator --external:dotenv --external:reflect-metadata --external:rxjs --external:express",
+    "build": "esbuild src/main.ts --bundle --platform=node --target=node20 --outfile=dist/main.js --external:@nestjs/common --external:@nestjs/config --external:@nestjs/core --external:@nestjs/jwt --external:@nestjs/platform-express --external:@nestjs/microservices --external:@nestjs/websockets --external:@prisma/client --external:bcryptjs --external:bullmq --external:class-transformer --external:class-validator --external:dotenv --external:ioredis --external:reflect-metadata --external:rxjs --external:express",
     "start": "node dist/main.js",
     "typecheck": "tsc --noEmit"
   },
@@ -17,9 +17,11 @@
     "@nestjs/jwt": "^10.2.0",
     "@nestjs/platform-express": "^10.4.1",
     "bcryptjs": "^2.4.3",
+    "bullmq": "^5.12.0",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.1",
     "dotenv": "^17.4.2",
+    "ioredis": "^5.4.1",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1"
   },

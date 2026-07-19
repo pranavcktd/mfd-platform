@@ -39,6 +39,8 @@ export interface SchemaMappingJobData {
    * trust from either side.
    */
   expectedDistributorId?: string;
+  /** Admin audit-log row this job originated from, threaded through so failures/results are visible in the admin mail-log view. */
+  mailLogId?: string;
 }
 
 type LedgerRow = Prisma.RtaInsightLedgerCreateManyInput;
@@ -87,13 +89,41 @@ async function resolveDistributorId(
  * not supplied by the caller — multi-tenant routing lives here, not upstream.
  */
 export async function processSchemaMapping(job: Job<SchemaMappingJobData>) {
-  const { rtaType, sourceFormat, expectedDistributorId } = job.data;
+  const { rtaType, sourceFormat, expectedDistributorId, mailLogId } = job.data;
   const fileContents = Buffer.from(job.data.fileContents, "base64");
+
+  try {
+    return await runSchemaMapping({ rtaType, sourceFormat, expectedDistributorId, fileContents, mailLogId });
+  } catch (err) {
+    if (mailLogId) {
+      await prisma.mailIngestionLog.update({
+        where: { id: mailLogId },
+        data: { status: "PARSE_FAILED", errorMessage: err instanceof Error ? err.message : String(err) },
+      });
+    }
+    throw err;
+  }
+}
+
+async function runSchemaMapping(args: {
+  rtaType: "CAMS" | "KFINTECH";
+  sourceFormat: "DBF" | "CSV" | "TXT";
+  expectedDistributorId: string | undefined;
+  fileContents: Buffer;
+  mailLogId: string | undefined;
+}) {
+  const { rtaType, sourceFormat, expectedDistributorId, fileContents, mailLogId } = args;
 
   const rawRecords =
     sourceFormat === "DBF" ? await readDbfRecords(fileContents) : readDelimitedRecords(fileContents);
 
   if (rawRecords.length === 0) {
+    if (mailLogId) {
+      await prisma.mailIngestionLog.update({
+        where: { id: mailLogId },
+        data: { status: "COMPLETED", rowsInserted: 0 },
+      });
+    }
     return { inserted: 0 };
   }
 
@@ -106,11 +136,13 @@ export async function processSchemaMapping(job: Job<SchemaMappingJobData>) {
   }
 
   let rows: LedgerRow[];
+  let resolvedDistributorId: string | undefined;
 
   switch (reportCode) {
     case "MFSD201": {
       const normalized = rawRecords.map((raw) => mapMfsd201Record(raw, sourceFormat, rtaType));
       const distributorId = await resolveDistributorId(normalized, expectedDistributorId);
+      resolvedDistributorId = distributorId;
 
       rows = normalized.map((r) => ({
         distributorId,
@@ -184,6 +216,7 @@ export async function processSchemaMapping(job: Job<SchemaMappingJobData>) {
     case "INVESTOR_MASTER": {
       const normalized = rawRecords.map((raw) => mapInvestorMasterRecord(raw, rtaType));
       const distributorId = await resolveDistributorId(normalized, expectedDistributorId);
+      resolvedDistributorId = distributorId;
 
       rows = normalized.map((r) => ({
         distributorId,
@@ -220,6 +253,7 @@ export async function processSchemaMapping(job: Job<SchemaMappingJobData>) {
     case "CLIENT_AUM": {
       const normalized = rawRecords.map((raw) => mapClientAumRecord(raw, rtaType));
       const distributorId = await resolveDistributorId(normalized, expectedDistributorId);
+      resolvedDistributorId = distributorId;
 
       rows = normalized.map((r) => ({
         distributorId,
@@ -259,6 +293,7 @@ export async function processSchemaMapping(job: Job<SchemaMappingJobData>) {
     case "SIP_REGISTRATION": {
       const normalized = rawRecords.map((raw) => mapSipRegistrationRecord(raw, rtaType));
       const distributorId = await resolveDistributorId(normalized, expectedDistributorId);
+      resolvedDistributorId = distributorId;
 
       rows = normalized.map((r) => ({
         distributorId,
@@ -323,5 +358,18 @@ export async function processSchemaMapping(job: Job<SchemaMappingJobData>) {
   }
 
   const result = await prisma.rtaInsightLedger.createMany({ data: rows, skipDuplicates: true });
+
+  if (mailLogId) {
+    await prisma.mailIngestionLog.update({
+      where: { id: mailLogId },
+      data: {
+        status: "COMPLETED",
+        reportCode,
+        rowsInserted: result.count,
+        distributorId: resolvedDistributorId,
+      },
+    });
+  }
+
   return { inserted: result.count };
 }

@@ -25,6 +25,7 @@ model Distributor {
   transactions      Transaction[]
   sipRegistrations  SipRegistration[]
   ledgerEntries     RtaInsightLedger[]
+  mailIngestionLogs MailIngestionLog[]
 
   @@map("distributors")
 }
@@ -258,6 +259,43 @@ model SipRegistration {
 
   @@index([distributorId, folioId])
   @@map("sip_registrations")
+}
+
+enum MailIngestionStatus {
+  NO_LINK
+  ENQUEUED
+  DOWNLOAD_FAILED
+  DECRYPT_FAILED
+  PARSE_FAILED
+  COMPLETED
+}
+
+/// Admin audit trail for the mail-ingestion pipeline: one row per RTA email
+/// seen, updated in place as it moves through mail-ingestion ->
+/// archive-decryption -> schema-mapping (the same row id threads through
+/// all three job stages as mailLogId). distributorId is nullable because
+/// it isn't known until schema-mapping resolves the ARN code embedded in
+/// the report data — often well after this row is first created.
+model MailIngestionLog {
+  id            String               @id @default(uuid()) @db.Uuid
+  rtaType       String               @map("rta_type")
+  fromAddress   String               @map("from_address")
+  subject       String?
+  receivedAt    DateTime?            @map("received_at")
+  downloadUrl   String?              @map("download_url")
+  status        MailIngestionStatus
+  distributorId String?              @map("distributor_id") @db.Uuid
+  distributor   Distributor?         @relation(fields: [distributorId], references: [id])
+  reportCode    String?              @map("report_code")
+  rowsInserted  Int?                 @map("rows_inserted")
+  errorMessage  String?              @map("error_message")
+
+  createdAt     DateTime             @default(now()) @map("created_at")
+  updatedAt     DateTime             @updatedAt @map("updated_at")
+
+  @@index([rtaType, createdAt])
+  @@index([distributorId])
+  @@map("mail_ingestion_logs")
 }
 
 /// A purchase/redemption/switch/SIP-installment/dividend event on a folio.

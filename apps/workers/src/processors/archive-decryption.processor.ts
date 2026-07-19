@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { prisma } from "@mfd/db";
 import { listDecryptedCredentials } from "../credential-lookup";
 import { schemaMappingQueue } from "../queues/queue-producers";
 
@@ -11,6 +12,8 @@ export interface ArchiveDecryptionJobData {
   rtaType: "CAMS" | "KFINTECH";
   /** Header-match candidate from mail-ingestion, if any — narrows which stored credential to try first/only, and is cross-checked against the ARN embedded in the parsed data downstream. */
   expectedDistributorId?: string;
+  /** Admin audit-log row this job originated from, threaded through so failures/progress are visible in the admin mail-log view. */
+  mailLogId?: string;
 }
 
 interface ExtractedFile {
@@ -135,10 +138,33 @@ export async function decryptArchive(
  * wherever this actually deploys.
  */
 export async function processArchiveDecryption(job: Job<ArchiveDecryptionJobData>) {
-  const { downloadUrl, rtaType, expectedDistributorId } = job.data;
+  const { downloadUrl, rtaType, expectedDistributorId, mailLogId } = job.data;
 
-  const zipBuffer = await downloadZip(downloadUrl);
-  const decrypted = await decryptArchive(zipBuffer, rtaType, expectedDistributorId);
+  let zipBuffer: Buffer;
+  try {
+    zipBuffer = await downloadZip(downloadUrl);
+  } catch (err) {
+    if (mailLogId) {
+      await prisma.mailIngestionLog.update({
+        where: { id: mailLogId },
+        data: { status: "DOWNLOAD_FAILED", errorMessage: err instanceof Error ? err.message : String(err) },
+      });
+    }
+    throw err;
+  }
+
+  let decrypted: DecryptedArchive;
+  try {
+    decrypted = await decryptArchive(zipBuffer, rtaType, expectedDistributorId);
+  } catch (err) {
+    if (mailLogId) {
+      await prisma.mailIngestionLog.update({
+        where: { id: mailLogId },
+        data: { status: "DECRYPT_FAILED", errorMessage: err instanceof Error ? err.message : String(err) },
+      });
+    }
+    throw err;
+  }
 
   await schemaMappingQueue().add("schema-mapping", {
     rtaType,
@@ -146,6 +172,7 @@ export async function processArchiveDecryption(job: Job<ArchiveDecryptionJobData
     // Base64, not the raw Buffer — see the field comment on SchemaMappingJobData.
     fileContents: decrypted.fileContents.toString("base64"),
     expectedDistributorId: expectedDistributorId ?? decrypted.candidateDistributorId,
+    mailLogId,
   });
 
   return { sourceFormat: decrypted.sourceFormat, bytes: decrypted.fileContents.length };
