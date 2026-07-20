@@ -42,6 +42,25 @@ const BODY_PRIORITY: Record<RtaSender, Array<"text" | "html">> = {
   KFINTECH: ["html", "text"],
 };
 
+/**
+ * KFintech reuses the same scdelivery.kfintech.com/c/ click-tracking
+ * domain for every outbound link in every email it sends, not just real
+ * report deliveries. Confirmed against real inbox mail: a "Brokerage
+ * Annexure/GST Invoice" newsletter matched the same LINK_PATTERNS.KFINTECH
+ * regex and yielded a Facebook link, which the pipeline then tried (and
+ * failed) to decrypt as a report archive. Every genuine report-delivery
+ * subject seen in the real inbox reliably contains "Report for Ref"
+ * (91/91 observed, across "Report for Ref. No. :" / "Report for Ref.No :"
+ * / "Report for Ref.no." spelling variants); every non-report subject
+ * (brokerage invoices, tax-filing promos, GST reminders) does not. CAMS
+ * doesn't need this gate: its link pattern
+ * (mailbackNN.camsonline.com/mailback_result/) is already report-specific,
+ * not a generic click-tracker.
+ */
+const REPORT_SUBJECT_GATE: Partial<Record<RtaSender, RegExp>> = {
+  KFINTECH: /report for ref/i,
+};
+
 /** Identifies which RTA sent an email, from its From: address. Returns null for anything else — mail-ingestion should skip those. */
 export function identifyRtaSender(fromAddress: string): RtaSender | null {
   const lower = fromAddress.toLowerCase();
@@ -53,8 +72,18 @@ export function identifyRtaSender(fromAddress: string): RtaSender | null {
   return null;
 }
 
-/** Extracts the RTA secure-download link from the email body, checking text/HTML in the RTA-specific reliable order. Returns null for "no data" emails (CAMS) or anything without a real report link. */
-export function extractDownloadLink(rta: RtaSender, bodyText: string, bodyHtml?: string): string | null {
+/**
+ * Extracts the RTA secure-download link from the email body, checking
+ * text/HTML in the RTA-specific reliable order. Returns null for "no data"
+ * emails (CAMS), non-report emails from the same sender (KFintech — see
+ * REPORT_SUBJECT_GATE), or anything without a real report link.
+ */
+export function extractDownloadLink(rta: RtaSender, bodyText: string, bodyHtml?: string, subject?: string): string | null {
+  const subjectGate = REPORT_SUBJECT_GATE[rta];
+  if (subjectGate && !subjectGate.test(subject ?? "")) {
+    return null;
+  }
+
   const pattern = LINK_PATTERNS[rta];
   const bodies: Record<"text" | "html", string | undefined> = { text: bodyText, html: bodyHtml };
 

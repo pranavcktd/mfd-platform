@@ -16,7 +16,7 @@ import {
   updateFolioBalance,
   upsertSipRegistration,
 } from "../crm-sync";
-import { resolveTenantFromRecords } from "../tenant-resolution";
+import { resolveTenantFromRecords, type ResolvedTenant } from "../tenant-resolution";
 
 export interface SchemaMappingJobData {
   rtaType: "CAMS" | "KFINTECH";
@@ -58,10 +58,19 @@ function toJsonPayload(record: object) {
   );
 }
 
-async function resolveDistributorId(
+/**
+ * Returns the full resolved tenant (distributorId AND arnProfileId), not
+ * just distributorId — arnProfileId is what lets downstream Folio writes
+ * record which specific ARN the business is booked under (needed for the
+ * dashboard's per-ARN filter), not just which distributor. Discarding it
+ * here (as the code previously did) meant every Folio's arnProfileId
+ * silently stayed null forever, even though the schema has the column
+ * specifically for this.
+ */
+async function resolveTenant(
   records: Array<{ brokerArnCode?: string }>,
   expectedDistributorId: string | undefined,
-): Promise<string> {
+): Promise<ResolvedTenant> {
   const tenant = await resolveTenantFromRecords(records);
   if (expectedDistributorId && expectedDistributorId !== tenant.distributorId) {
     throw new Error(
@@ -69,7 +78,7 @@ async function resolveDistributorId(
         `data resolves to distributorId=${tenant.distributorId} (arnProfileId=${tenant.arnProfileId})`,
     );
   }
-  return tenant.distributorId;
+  return tenant;
 }
 
 /**
@@ -141,7 +150,7 @@ async function runSchemaMapping(args: {
   switch (reportCode) {
     case "MFSD201": {
       const normalized = rawRecords.map((raw) => mapMfsd201Record(raw, sourceFormat, rtaType));
-      const distributorId = await resolveDistributorId(normalized, expectedDistributorId);
+      const { distributorId, arnProfileId } = await resolveTenant(normalized, expectedDistributorId);
       resolvedDistributorId = distributorId;
 
       rows = normalized.map((r) => ({
@@ -184,6 +193,7 @@ async function runSchemaMapping(args: {
         if (!cached) {
           cached = resolveClientAndFolioId({
             distributorId,
+            arnProfileId,
             panNumber: r.investorPan,
             investorName: r.investorName,
             amcCode: r.amcCode,
@@ -215,7 +225,7 @@ async function runSchemaMapping(args: {
     }
     case "INVESTOR_MASTER": {
       const normalized = rawRecords.map((raw) => mapInvestorMasterRecord(raw, rtaType));
-      const distributorId = await resolveDistributorId(normalized, expectedDistributorId);
+      const { distributorId, arnProfileId } = await resolveTenant(normalized, expectedDistributorId);
       resolvedDistributorId = distributorId;
 
       rows = normalized.map((r) => ({
@@ -238,6 +248,7 @@ async function runSchemaMapping(args: {
       for (const r of normalized) {
         await upsertInvestorMasterClientAndFolio({
           distributorId,
+          arnProfileId,
           panNumber: r.investorPan,
           investorName: r.investorName,
           email: r.email,
@@ -252,7 +263,7 @@ async function runSchemaMapping(args: {
     }
     case "CLIENT_AUM": {
       const normalized = rawRecords.map((raw) => mapClientAumRecord(raw, rtaType));
-      const distributorId = await resolveDistributorId(normalized, expectedDistributorId);
+      const { distributorId, arnProfileId } = await resolveTenant(normalized, expectedDistributorId);
       resolvedDistributorId = distributorId;
 
       rows = normalized.map((r) => ({
@@ -274,6 +285,7 @@ async function runSchemaMapping(args: {
         }
         const { folioId } = await resolveClientAndFolioId({
           distributorId,
+          arnProfileId,
           panNumber: r.investorPan,
           investorName: r.investorName,
           amcCode: r.amcCode,
@@ -292,7 +304,7 @@ async function runSchemaMapping(args: {
     }
     case "SIP_REGISTRATION": {
       const normalized = rawRecords.map((raw) => mapSipRegistrationRecord(raw, rtaType));
-      const distributorId = await resolveDistributorId(normalized, expectedDistributorId);
+      const { distributorId, arnProfileId } = await resolveTenant(normalized, expectedDistributorId);
       resolvedDistributorId = distributorId;
 
       rows = normalized.map((r) => ({
@@ -333,6 +345,7 @@ async function runSchemaMapping(args: {
         // the SipRegistration row itself.
         const { folioId } = await resolveClientAndFolioId({
           distributorId,
+          arnProfileId,
           panNumber: r.investorPan,
           investorName: r.investorName,
           amcCode: r.amcCode,

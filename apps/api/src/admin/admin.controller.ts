@@ -1,8 +1,9 @@
-import { Body, Controller, Param, Post, UseGuards } from "@nestjs/common";
+import { Body, Controller, Param, Patch, Post, UseGuards } from "@nestjs/common";
 import { AdminGuard } from "./admin.guard";
 import { AdminService } from "./admin.service";
 import { CreateDistributorDto } from "./dto/create-distributor.dto";
 import { CreateChildArnProfileDto } from "./dto/create-child-arn-profile.dto";
+import { ResetPasswordDto } from "./dto/reset-password.dto";
 
 @UseGuards(AdminGuard)
 @Controller("admin/distributors")
@@ -20,5 +21,10 @@ export class AdminController {
     @Body() dto: CreateChildArnProfileDto,
   ) {
     return this.adminService.addChildArnProfile(distributorId, dto);
+  }
+
+  @Patch(":distributorId/reset-password")
+  resetPassword(@Param("distributorId") distributorId: string, @Body() dto: ResetPasswordDto) {
+    return this.adminService.resetPassword(distributorId, dto);
   }
 }

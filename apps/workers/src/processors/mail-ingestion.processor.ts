@@ -133,7 +133,7 @@ export async function processMailIngestion(_job: Job<MailIngestionJobData>) {
           const parsed = await simpleParser(full.source);
           const bodyText = parsed.text ?? "";
           const bodyHtml = typeof parsed.html === "string" ? parsed.html : undefined;
-          const downloadUrl = extractDownloadLink(candidate.rta, bodyText, bodyHtml);
+          const downloadUrl = extractDownloadLink(candidate.rta, bodyText, bodyHtml, candidate.subject);
           if (!downloadUrl) {
             skipped++;
             continue;

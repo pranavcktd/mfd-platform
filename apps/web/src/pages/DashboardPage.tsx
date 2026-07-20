@@ -1,69 +1,114 @@
+import { useState } from "react";
 import { Wallet, Users, UserX, Repeat, TrendingUp, Newspaper, ExternalLink } from "lucide-react";
 import { StatTile } from "../components/ui/StatTile";
 import { Card } from "../components/ui/Card";
-import {
-  mockKpis,
-  mockNotices,
-  mockRecentClients,
-  mockTopAmcs,
-  mockTopClients,
-} from "../lib/mock-dashboard-data";
+import { ArnFilter } from "../components/ui/ArnFilter";
+import { useArnProfiles, useDashboardSummary } from "../hooks/useDashboard";
+import { formatCount, formatDate, formatInrCompact } from "../lib/format";
+import { mockNotices } from "../lib/mock-dashboard-data";
 
 export function DashboardPage() {
+  const [selectedArnIds, setSelectedArnIds] = useState<string[]>([]);
+  const { data: arnProfiles } = useArnProfiles();
+  const { data, isLoading, isError } = useDashboardSummary(selectedArnIds);
+
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-lg font-semibold text-ink">Dashboard</h1>
-        <p className="text-sm text-ink-secondary">Placeholder data — no live database connected yet.</p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-lg font-semibold text-ink">Dashboard</h1>
+          <p className="text-sm text-ink-secondary">
+            {isError ? "Could not load live data." : "Live data from your onboarded RTA feeds."}
+          </p>
+        </div>
+        {arnProfiles && (
+          <ArnFilter arnProfiles={arnProfiles} selectedIds={selectedArnIds} onChange={setSelectedArnIds} />
+        )}
       </div>
 
       <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-5">
-        <StatTile label="Total AUM" value={mockKpis.totalAum} icon={Wallet} accent="series-1" href="/reports" />
-        <StatTile label="Total Clients" value={mockKpis.totalClients} icon={Users} accent="series-2" href="/crm" />
-        <StatTile label="Non-PAN Clients" value={mockKpis.nonPanClients} icon={UserX} accent="series-4" href="/mis" />
         <StatTile
-          label="Monthly SIP Value"
-          value={mockKpis.monthlySipValue}
+          label="Total AUM"
+          value={isLoading || !data ? "—" : formatInrCompact(data.totalAum)}
+          icon={Wallet}
+          accent="series-1"
+          href="/reports"
+        />
+        <StatTile
+          label="Total Clients"
+          value={isLoading || !data ? "—" : formatCount(data.totalClients)}
+          icon={Users}
+          accent="series-2"
+          href="/crm"
+        />
+        <StatTile
+          label="Non-PAN Clients"
+          value={isLoading || !data ? "—" : formatCount(data.nonPanClients)}
+          icon={UserX}
+          accent="series-4"
+          href="/mis"
+        />
+        <StatTile
+          label="Active SIP Value"
+          value={isLoading || !data ? "—" : formatInrCompact(data.monthlySipValue)}
           icon={TrendingUp}
           accent="series-5"
           href="/reports"
         />
-        <StatTile label="Active SIPs" value={mockKpis.activeSips} icon={Repeat} accent="series-1" href="/reports" />
+        <StatTile
+          label="Active SIPs"
+          value={isLoading || !data ? "—" : formatCount(data.activeSips)}
+          icon={Repeat}
+          accent="series-1"
+          href="/reports"
+        />
       </div>
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <div className="space-y-4 lg:col-span-2">
-          <Card title="Top AMCs by AUM">
+          <Card title="Top AMCs by AUM (by RTA scheme code — name mapping not yet available)">
             <ul className="divide-y divide-[var(--gridline)]">
-              {mockTopAmcs.map((amc) => (
-                <li key={amc.name} className="flex items-center justify-between py-2 text-sm">
-                  <span className="text-ink">{amc.name}</span>
-                  <span className="tabular-nums text-ink-secondary">{amc.aum}</span>
-                </li>
-              ))}
+              {data?.topAmcs.length ? (
+                data.topAmcs.map((amc) => (
+                  <li key={amc.amcCode} className="flex items-center justify-between py-2 text-sm">
+                    <span className="text-ink">{amc.amcCode}</span>
+                    <span className="tabular-nums text-ink-secondary">{formatInrCompact(amc.aum)}</span>
+                  </li>
+                ))
+              ) : (
+                <li className="py-2 text-sm text-ink-muted">{isLoading ? "Loading…" : "No data yet."}</li>
+              )}
             </ul>
           </Card>
 
           <Card title="Top Clients by AUM">
             <ul className="divide-y divide-[var(--gridline)]">
-              {mockTopClients.map((client) => (
-                <li key={client.name} className="flex items-center justify-between py-2 text-sm">
-                  <span className="text-ink">{client.name}</span>
-                  <span className="tabular-nums text-ink-secondary">{client.aum}</span>
-                </li>
-              ))}
+              {data?.topClients.length ? (
+                data.topClients.map((client) => (
+                  <li key={client.name} className="flex items-center justify-between py-2 text-sm">
+                    <span className="text-ink">{client.name}</span>
+                    <span className="tabular-nums text-ink-secondary">{formatInrCompact(client.aum)}</span>
+                  </li>
+                ))
+              ) : (
+                <li className="py-2 text-sm text-ink-muted">{isLoading ? "Loading…" : "No data yet."}</li>
+              )}
             </ul>
           </Card>
 
           <Card title="Newly Added Clients">
             <ul className="divide-y divide-[var(--gridline)]">
-              {mockRecentClients.map((client) => (
-                <li key={client.name} className="flex items-center justify-between py-2 text-sm">
-                  <span className="text-ink">{client.name}</span>
-                  <span className="text-ink-secondary">{client.transactionType}</span>
-                  <span className="tabular-nums text-ink-muted">{client.date}</span>
-                </li>
-              ))}
+              {data?.recentClients.length ? (
+                data.recentClients.map((client) => (
+                  <li key={client.name} className="flex items-center justify-between py-2 text-sm">
+                    <span className="text-ink">{client.name}</span>
+                    <span className="text-ink-secondary">{client.transactionType ?? "—"}</span>
+                    <span className="tabular-nums text-ink-muted">{formatDate(client.date)}</span>
+                  </li>
+                ))
+              ) : (
+                <li className="py-2 text-sm text-ink-muted">{isLoading ? "Loading…" : "No data yet."}</li>
+              )}
             </ul>
           </Card>
         </div>

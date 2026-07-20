@@ -6,17 +6,24 @@ async function upsertFolioRow(
   amcCode: string,
   folioNumber: string,
   schemeCode: string,
+  arnProfileId?: string,
 ): Promise<string> {
+  // arnProfileId is set on both create AND update (not just create): every
+  // caller in a given ingestion run resolves it from the same batch-wide
+  // ARN code (see tenant-resolution.ts's single-ARN-per-batch invariant),
+  // so re-asserting it on every upsert is safe and also self-heals any
+  // Folio row created before this field was threaded through at all.
   const folio = await prisma.folio.upsert({
     where: { distributorId_amcCode_folioNumber_schemeCode: { distributorId, amcCode, folioNumber, schemeCode } },
-    create: { distributorId, clientId, amcCode, folioNumber, schemeCode },
-    update: {},
+    create: { distributorId, clientId, amcCode, folioNumber, schemeCode, arnProfileId },
+    update: { arnProfileId },
   });
   return folio.id;
 }
 
 interface TransactionClientFolioParams {
   distributorId: string;
+  arnProfileId?: string;
   panNumber?: string;
   investorName?: string;
   amcCode: string;
@@ -43,7 +50,7 @@ interface TransactionClientFolioParams {
 export async function resolveClientAndFolioId(
   params: TransactionClientFolioParams,
 ): Promise<{ clientId: string; folioId: string }> {
-  const { distributorId, panNumber, investorName, amcCode, folioNumber, schemeCode } = params;
+  const { distributorId, arnProfileId, panNumber, investorName, amcCode, folioNumber, schemeCode } = params;
 
   if (panNumber) {
     const client = await prisma.client.upsert({
@@ -51,7 +58,7 @@ export async function resolveClientAndFolioId(
       create: { distributorId, panNumber, name: investorName ?? "Unknown" },
       update: {},
     });
-    const folioId = await upsertFolioRow(distributorId, client.id, amcCode, folioNumber, schemeCode);
+    const folioId = await upsertFolioRow(distributorId, client.id, amcCode, folioNumber, schemeCode, arnProfileId);
     return { clientId: client.id, folioId };
   }
 
@@ -59,17 +66,21 @@ export async function resolveClientAndFolioId(
     where: { distributorId_amcCode_folioNumber_schemeCode: { distributorId, amcCode, folioNumber, schemeCode } },
   });
   if (existingFolio) {
+    if (arnProfileId && existingFolio.arnProfileId !== arnProfileId) {
+      await prisma.folio.update({ where: { id: existingFolio.id }, data: { arnProfileId } });
+    }
     return { clientId: existingFolio.clientId, folioId: existingFolio.id };
   }
   const client = await prisma.client.create({ data: { distributorId, name: investorName ?? "Unknown" } });
   const folio = await prisma.folio.create({
-    data: { distributorId, clientId: client.id, amcCode, folioNumber, schemeCode },
+    data: { distributorId, clientId: client.id, amcCode, folioNumber, schemeCode, arnProfileId },
   });
   return { clientId: client.id, folioId: folio.id };
 }
 
 interface InvestorMasterClientFolioParams {
   distributorId: string;
+  arnProfileId?: string;
   panNumber?: string;
   investorName: string;
   email?: string;
@@ -95,8 +106,18 @@ interface InvestorMasterClientFolioParams {
 export async function upsertInvestorMasterClientAndFolio(
   params: InvestorMasterClientFolioParams,
 ): Promise<{ clientId: string; folioId: string | null }> {
-  const { distributorId, panNumber, investorName, email, mobile, dateOfBirth, amcCode, folioNumber, productCode } =
-    params;
+  const {
+    distributorId,
+    arnProfileId,
+    panNumber,
+    investorName,
+    email,
+    mobile,
+    dateOfBirth,
+    amcCode,
+    folioNumber,
+    productCode,
+  } = params;
   const clientData = {
     name: investorName,
     email: email ?? null,
@@ -112,7 +133,7 @@ export async function upsertInvestorMasterClientAndFolio(
     });
     const folioId =
       amcCode && productCode
-        ? await upsertFolioRow(distributorId, client.id, amcCode, folioNumber, productCode)
+        ? await upsertFolioRow(distributorId, client.id, amcCode, folioNumber, productCode, arnProfileId)
         : null;
     return { clientId: client.id, folioId };
   }
@@ -130,11 +151,14 @@ export async function upsertInvestorMasterClientAndFolio(
     });
     if (existingFolio) {
       await prisma.client.update({ where: { id: existingFolio.clientId }, data: clientData });
+      if (arnProfileId && existingFolio.arnProfileId !== arnProfileId) {
+        await prisma.folio.update({ where: { id: existingFolio.id }, data: { arnProfileId } });
+      }
       return { clientId: existingFolio.clientId, folioId: existingFolio.id };
     }
     const client = await prisma.client.create({ data: { distributorId, ...clientData } });
     const folio = await prisma.folio.create({
-      data: { distributorId, clientId: client.id, amcCode, folioNumber, schemeCode: productCode },
+      data: { distributorId, clientId: client.id, amcCode, folioNumber, schemeCode: productCode, arnProfileId },
     });
     return { clientId: client.id, folioId: folio.id };
   }

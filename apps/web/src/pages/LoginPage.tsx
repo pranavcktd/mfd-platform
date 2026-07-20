@@ -1,26 +1,14 @@
 import { useState, type FormEvent } from "react";
-import { useNavigate } from "react-router-dom";
 import { useLogin } from "../hooks/useAuth";
-import { setAccessToken } from "../lib/api-client";
 
 export function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const login = useLogin();
-  const navigate = useNavigate();
 
   function handleSubmit(event: FormEvent) {
     event.preventDefault();
     login.mutate({ email, password });
-  }
-
-  function handleViewDemo() {
-    // No database is connected yet, so real login always fails — this sets a
-    // placeholder token purely to get past the route guard and show the
-    // dashboard UI with mock data. Not a real session; API calls that need
-    // real auth will still fail.
-    setAccessToken("demo-mode-no-backend-session");
-    navigate("/");
   }
 
   return (
@@ -68,20 +56,6 @@ export function LoginPage() {
           className="w-full rounded-md bg-series-1 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
         >
           {login.isPending ? "Signing in..." : "Sign in"}
-        </button>
-
-        <div className="my-4 flex items-center gap-3">
-          <div className="h-px flex-1 bg-[var(--border)]" />
-          <span className="text-xs text-ink-muted">no database connected yet</span>
-          <div className="h-px flex-1 bg-[var(--border)]" />
-        </div>
-
-        <button
-          type="button"
-          onClick={handleViewDemo}
-          className="w-full rounded-md border border-[var(--border)] py-2 text-sm font-medium text-ink-secondary transition-colors hover:bg-[var(--gridline)]/50"
-        >
-          View demo dashboard (mock data, skip login)
         </button>
       </form>
     </div>
