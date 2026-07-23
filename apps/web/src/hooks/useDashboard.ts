@@ -7,7 +7,7 @@ export interface DashboardSummary {
   nonPanClients: number;
   monthlySipValue: string;
   activeSips: number;
-  topAmcs: Array<{ amcCode: string; aum: string }>;
+  topAmcs: Array<{ amcCode: string; sampleSchemeName: string | null; aum: string }>;
   topClients: Array<{ name: string; aum: string }>;
   recentClients: Array<{ name: string; transactionType: string | null; date: string }>;
 }

@@ -94,6 +94,16 @@ export class DashboardService {
     });
     const nameById = new Map(topClientNames.map((c) => [c.id, c.name]));
 
+    // Real scheme names captured from the RTA (not a fabricated AMC-name
+    // mapping — no reference file for that exists) as a naming hint next to
+    // the bare amcCode, same approach as reports.service.ts's AUM report.
+    const sampleNames = await prisma.folio.findMany({
+      where: { ...folioWhere, amcCode: { in: topAmcRows.map((r) => r.amcCode) }, schemeName: { not: null } },
+      distinct: ["amcCode"],
+      select: { amcCode: true, schemeName: true },
+    });
+    const schemeNameByAmc = new Map(sampleNames.map((s) => [s.amcCode, s.schemeName]));
+
     const recentClientDetails = await Promise.all(
       recentClients.map(async (client) => {
         const latestTx = await prisma.transaction.findFirst({
@@ -101,11 +111,11 @@ export class DashboardService {
             folio: { clientId: client.id, ...(arnScope ? { arnProfileId: { in: arnScope } } : {}) },
           },
           orderBy: { transactionDate: "desc" },
-          select: { transactionType: true, transactionDate: true },
+          select: { transactionType: true, transactionDescription: true, transactionDate: true },
         });
         return {
           name: client.name,
-          transactionType: latestTx?.transactionType ?? null,
+          transactionType: latestTx?.transactionDescription ?? latestTx?.transactionType ?? null,
           date: (latestTx?.transactionDate ?? client.createdAt).toISOString(),
         };
       }),
@@ -119,6 +129,7 @@ export class DashboardService {
       activeSips: activeSipCount,
       topAmcs: topAmcRows.map((r) => ({
         amcCode: r.amcCode,
+        sampleSchemeName: schemeNameByAmc.get(r.amcCode) ?? null,
         aum: r._sum.valuationAmount?.toString() ?? "0",
       })),
       topClients: topClientRows.map((r) => ({

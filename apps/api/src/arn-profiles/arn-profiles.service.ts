@@ -1,16 +1,12 @@
 import { ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import { prisma } from "@mfd/db";
-import { encryptSecret, maskPan } from "@mfd/shared";
+import { encryptSecret } from "@mfd/shared";
 import { SaveCredentialDto } from "./dto/save-credential.dto";
 
 @Injectable()
 export class ArnProfilesService {
   async listForDistributor(distributorId: string) {
-    const arnProfiles = await prisma.arnProfile.findMany({ where: { distributorId } });
-    return arnProfiles.map((profile) => ({
-      ...profile,
-      panNumber: profile.panNumber ? maskPan(profile.panNumber) : null,
-    }));
+    return prisma.arnProfile.findMany({ where: { distributorId } });
   }
 
   async saveCredential(distributorId: string, arnProfileId: string, dto: SaveCredentialDto) {

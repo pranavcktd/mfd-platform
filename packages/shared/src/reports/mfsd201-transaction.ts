@@ -32,6 +32,16 @@ const MFSD201_ALIASES = {
   investorPan: { dbf: "PAN1", cams: "PAN", csv: "PAN1" },
   transactionNumber: { dbf: "TD_TRNO", cams: "TRXNNO", csv: "Transaction Number" },
   transactionTypeCode: { dbf: "TD_TRTYPE", cams: "TRXNTYPE", csv: "Transaction Type" },
+  /// Plain-English transaction description, straight from the RTA — not a
+  /// code needing a lookup table. CAMS's TRXN_TYPE_ (e.g. "Additional
+  /// Purchase") is populated even when TRXNTYPE's code isn't in our table
+  /// (0% recognized for CAMS as of 2026-07-20). KFintech's own "Transaction
+  /// Description" column serves the same role there. The "dbf" alias below
+  /// (KFintech DBF exports) is an unverified guess, following this table's
+  /// existing naming convention — no real KFintech .dbf sample exists to
+  /// check it against (only CAMS ships real .dbf in our samples; KFintech's
+  /// DBF path may never actually trigger against real ingestion).
+  transactionDescription: { dbf: "TRXN_DESC", cams: "TRXN_TYPE_", csv: "Transaction Description" },
   postDate: { dbf: "TD_PRDT", cams: "POSTDATE", csv: "Process Date" },
   tradeDate: { dbf: "NAVDATE", cams: "TRADDATE", csv: "Nav Date" },
   units: { dbf: "TD_UNITS", cams: "UNITS", csv: "Units" },
@@ -40,6 +50,17 @@ const MFSD201_ALIASES = {
   brokerArnCode: { dbf: "TD_AGENT", cams: "BROKCODE", csv: "Agent Code" },
   subBrokerCode: { dbf: "TD_BROKER", cams: "SUBBROK", csv: "Sub-Broker Code" },
   euin: { dbf: "EUIN", cams: "EUIN", csv: "EUIN" },
+  /// Real brokerage/commission data — confirmed present and populated in
+  /// real CAMS exports (BROKPERC/BROKCOMM), though blank in the one real
+  /// KFintech sample checked (its "Brokerage Percentage"/"Commission"
+  /// columns exist in the report layout but weren't populated in that
+  /// export — may be populated in other KFintech subscriptions).
+  brokeragePercent: { dbf: "TD_BROKPE", cams: "BROKPERC", csv: "Brokerage Percentage" },
+  brokerageAmount: { dbf: "TD_BROKCO", cams: "BROKCOMM", csv: "Commission" },
+  /// Asset class (e.g. "Equity(S)") — CAMS's SCHEME_TYP, KFintech's
+  /// AssetType. Enables real portfolio-composition analysis without needing
+  /// NAV/benchmark history.
+  assetClass: { dbf: "ASSETTYPE", cams: "SCHEME_TYP", csv: "AssetType" },
 } as const;
 
 type Mfsd201Field = keyof typeof MFSD201_ALIASES;
@@ -54,6 +75,11 @@ export interface NormalizedTransactionRecord {
   transactionNumber?: string;
   transactionTypeCode: string;
   transactionType: string;
+  /// Plain-English description straight from the RTA (see alias comment) —
+  /// used as the display-facing transaction label, since transactionType
+  /// falls back to "OTHER" for the ~100% of real CAMS codes our lookup
+  /// table doesn't recognize.
+  transactionDescription?: string;
   isRejection: boolean;
   isRecognizedTransactionType: boolean;
   postDate: Date;
@@ -61,6 +87,9 @@ export interface NormalizedTransactionRecord {
   units?: number;
   amount?: number;
   navPerUnit?: number;
+  brokeragePercent?: number;
+  brokerageAmount?: number;
+  assetClass?: string;
   brokerArnCode?: string;
   subBrokerCode?: string;
   euin?: string;
@@ -123,6 +152,7 @@ export function mapMfsd201Record(
     transactionNumber: optionalString(get("transactionNumber")),
     transactionTypeCode,
     transactionType: resolvedType.normalizedType,
+    transactionDescription: optionalString(get("transactionDescription")),
     isRejection: resolvedType.isRejection,
     isRecognizedTransactionType: resolvedType.isRecognized,
     postDate: parseRtaDate(get("postDate")) ?? (() => {
@@ -132,6 +162,9 @@ export function mapMfsd201Record(
     units: parseRtaNumber(get("units")),
     amount: parseRtaNumber(get("amount")),
     navPerUnit: parseRtaNumber(get("navPerUnit")),
+    brokeragePercent: parseRtaNumber(get("brokeragePercent")),
+    brokerageAmount: parseRtaNumber(get("brokerageAmount")),
+    assetClass: optionalString(get("assetClass")),
     brokerArnCode: optionalString(get("brokerArnCode")),
     subBrokerCode: optionalString(get("subBrokerCode")),
     euin: optionalString(get("euin")),

@@ -199,6 +199,8 @@ async function runSchemaMapping(args: {
             amcCode: r.amcCode,
             folioNumber: r.folioNumber,
             schemeCode: r.productCode,
+            schemeName: r.schemeDescription,
+            assetClass: r.assetClass,
           });
           folioCache.set(key, cached);
         }
@@ -213,10 +215,13 @@ async function runSchemaMapping(args: {
           distributorId,
           folioId,
           transactionType: r.transactionType,
+          transactionDescription: r.transactionDescription,
           transactionDate: r.postDate,
           amount: r.amount,
           units: r.units,
           navPerUnit: r.navPerUnit,
+          brokeragePercent: r.brokeragePercent,
+          brokerageAmount: r.brokerageAmount,
           idempotencyHash: rows[i].idempotencyHash,
         });
       }
@@ -257,6 +262,13 @@ async function runSchemaMapping(args: {
           amcCode: r.amcCode,
           folioNumber: r.folioNumber,
           productCode: r.productCode,
+          address1: r.address1,
+          address2: r.address2,
+          city: r.city,
+          pincode: r.pincode,
+          taxStatus: r.taxStatus,
+          bankAccountNumber: r.bankAccountNumber,
+          bankName: r.bankName,
         });
       }
       break;
@@ -291,6 +303,7 @@ async function runSchemaMapping(args: {
           amcCode: r.amcCode,
           folioNumber: r.folioNumber,
           schemeCode: r.productCode,
+          schemeName: r.schemeDescription,
         });
         await updateFolioBalance({
           folioId,

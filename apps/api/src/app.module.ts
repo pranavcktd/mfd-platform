@@ -8,6 +8,11 @@ import { ArnProfilesModule } from "./arn-profiles/arn-profiles.module";
 import { ProfileModule } from "./profile/profile.module";
 import { MailModule } from "./mail/mail.module";
 import { DashboardModule } from "./dashboard/dashboard.module";
+import { CrmModule } from "./crm/crm.module";
+import { MisModule } from "./mis/mis.module";
+import { ReportsModule } from "./reports/reports.module";
+import { OtherAssetsModule } from "./other-assets/other-assets.module";
+import { AnalysisModule } from "./analysis/analysis.module";
 
 @Module({
   imports: [
@@ -18,6 +23,11 @@ import { DashboardModule } from "./dashboard/dashboard.module";
     ProfileModule,
     MailModule,
     DashboardModule,
+    CrmModule,
+    MisModule,
+    ReportsModule,
+    OtherAssetsModule,
+    AnalysisModule,
   ],
   controllers: [HealthController],
   providers: [TenantMiddleware],

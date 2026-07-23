@@ -26,6 +26,7 @@ model Distributor {
   sipRegistrations  SipRegistration[]
   ledgerEntries     RtaInsightLedger[]
   mailIngestionLogs MailIngestionLog[]
+  otherAssets       OtherAsset[]
 
   @@map("distributors")
 }
@@ -175,9 +176,25 @@ model Client {
   dateOfBirth    DateTime?   @map("date_of_birth") @db.Date
   kycStatus      String?     @map("kyc_status")
 
+  /// All of the below are real fields present in the RTA's investor-master
+  /// report (CAMS WBR9 / KFintech MFSD211) that were parsed but never
+  /// persisted before 2026-07-22 — captured in
+  /// RtaInsightLedger.rawStructuredPayload only, never queryable. Nominee is
+  /// deliberately NOT modeled here: neither RTA's investor-master export
+  /// (as ingested) carries a nominee field at all — this isn't a missed
+  /// mapping, the data genuinely isn't in what we receive.
+  address1          String?  @map("address1")
+  address2          String?  @map("address2")
+  city              String?
+  pincode           String?
+  taxStatus         String?  @map("tax_status")
+  bankAccountNumber String?  @map("bank_account_number")
+  bankName          String?  @map("bank_name")
+
   createdAt      DateTime    @default(now()) @map("created_at")
 
   folios         Folio[]
+  otherAssets    OtherAsset[]
 
   /// Postgres treats NULLs as distinct for uniqueness purposes, so this only
   /// enforces one Client per (distributor, PAN) among clients that HAVE a
@@ -185,6 +202,30 @@ model Client {
   /// have as many rows as needed.
   @@unique([distributorId, panNumber])
   @@map("clients")
+}
+
+/// Manually-entered non-MF asset (real estate, FD, gold, direct equity, etc.)
+/// so a client's net worth isn't understated by only counting MF holdings.
+/// Never RTA-sourced — this is the one CRM-adjacent module that's genuinely
+/// manual-entry by design, not a future ingestion target.
+model OtherAsset {
+  id             String      @id @default(uuid()) @db.Uuid
+  distributorId  String      @map("distributor_id") @db.Uuid
+  distributor    Distributor @relation(fields: [distributorId], references: [id])
+
+  clientId       String      @map("client_id") @db.Uuid
+  client         Client      @relation(fields: [clientId], references: [id])
+
+  assetType      String      @map("asset_type")
+  description    String?
+  value          Decimal     @db.Decimal(18, 2)
+  asOfDate       DateTime    @map("as_of_date") @db.Date
+
+  createdAt      DateTime    @default(now()) @map("created_at")
+  updatedAt      DateTime    @updatedAt @map("updated_at")
+
+  @@index([distributorId, clientId])
+  @@map("other_assets")
 }
 
 /// One client's holding in one scheme. arnProfileId records which ARN the
@@ -204,6 +245,19 @@ model Folio {
   amcCode        String      @map("amc_code")
   schemeCode     String      @map("scheme_code")
   openDate       DateTime?   @map("open_date") @db.Date
+
+  /// Full scheme/plan name as sent by the RTA (CAMS's "SCHEME"/"SCH_NAME" or
+  /// KFintech's "Fund Description") — real data, e.g. "Aditya Birla Sun Life
+  /// Large & Mid Cap Fund - Growth-Regular Plan". amcCode/schemeCode alone
+  /// are short RTA-internal codes (single letters for CAMS, ~3-char for
+  /// KFintech) that mean nothing without this. Not an AMC-name lookup table
+  /// — no such reference file was available, so this stores exactly what
+  /// the RTA sent rather than a fabricated/guessed AMC display name.
+  schemeName     String?     @map("scheme_name")
+  /// Asset class as sent by the RTA (CAMS's "SCHEME_TYP" e.g. "Equity(S)",
+  /// KFintech's "AssetType") — enables real portfolio-composition analysis
+  /// without needing NAV/benchmark history.
+  assetClass     String?     @map("asset_class")
 
   /// Latest known balance snapshot (from CAMS WBR4 / KFintech MFSD203), not
   /// a time series — only overwritten when a newer report's asOfDate is
@@ -308,10 +362,22 @@ model Transaction {
   folio           Folio       @relation(fields: [folioId], references: [id])
 
   transactionType String      @map("transaction_type")
+  /// Plain-English description straight from the RTA (CAMS's TRXN_TYPE_ /
+  /// KFintech's "Transaction Description") — the display-facing label,
+  /// since transactionType falls back to "OTHER" for real CAMS codes our
+  /// lookup table doesn't recognize (see [[mfd_ingestion_engine]]).
+  transactionDescription String? @map("transaction_description")
   transactionDate DateTime    @map("transaction_date") @db.Date
   amount          Decimal?    @db.Decimal(18, 2)
   units           Decimal?    @db.Decimal(18, 4)
   navPerUnit      Decimal?    @map("nav_per_unit") @db.Decimal(12, 4)
+
+  /// Real brokerage/commission data (CAMS's BROKPERC/BROKCOMM) — confirmed
+  /// present and populated in real CAMS exports; blank in the one real
+  /// KFintech sample checked (report layout has the columns, this export
+  /// just didn't populate them).
+  brokeragePercent Decimal?   @map("brokerage_percent") @db.Decimal(8, 4)
+  brokerageAmount  Decimal?   @map("brokerage_amount") @db.Decimal(18, 2)
 
   idempotencyHash String      @unique @map("idempotency_hash")
   createdAt       DateTime    @default(now()) @map("created_at")

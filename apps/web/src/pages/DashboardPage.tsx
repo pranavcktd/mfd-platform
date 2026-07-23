@@ -66,12 +66,15 @@ export function DashboardPage() {
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <div className="space-y-4 lg:col-span-2">
-          <Card title="Top AMCs by AUM (by RTA scheme code — name mapping not yet available)">
+          <Card title="Top AMCs by AUM">
             <ul className="divide-y divide-[var(--gridline)]">
               {data?.topAmcs.length ? (
                 data.topAmcs.map((amc) => (
                   <li key={amc.amcCode} className="flex items-center justify-between py-2 text-sm">
-                    <span className="text-ink">{amc.amcCode}</span>
+                    <span className="text-ink">
+                      {amc.sampleSchemeName ? amc.sampleSchemeName.split(" - ")[0] : amc.amcCode}
+                      <span className="ml-1 text-xs text-ink-muted">({amc.amcCode})</span>
+                    </span>
                     <span className="tabular-nums text-ink-secondary">{formatInrCompact(amc.aum)}</span>
                   </li>
                 ))

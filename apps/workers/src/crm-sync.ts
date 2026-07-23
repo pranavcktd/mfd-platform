@@ -7,16 +7,25 @@ async function upsertFolioRow(
   folioNumber: string,
   schemeCode: string,
   arnProfileId?: string,
+  schemeName?: string,
+  assetClass?: string,
 ): Promise<string> {
   // arnProfileId is set on both create AND update (not just create): every
   // caller in a given ingestion run resolves it from the same batch-wide
   // ARN code (see tenant-resolution.ts's single-ARN-per-batch invariant),
   // so re-asserting it on every upsert is safe and also self-heals any
   // Folio row created before this field was threaded through at all.
+  // schemeName/assetClass only come from MFSD201/CLIENT_AUM records, not
+  // investor-master — spread conditionally so an investor-master-only call
+  // can't blank out a good value a transaction record already set.
+  const extra = {
+    ...(schemeName ? { schemeName } : {}),
+    ...(assetClass ? { assetClass } : {}),
+  };
   const folio = await prisma.folio.upsert({
     where: { distributorId_amcCode_folioNumber_schemeCode: { distributorId, amcCode, folioNumber, schemeCode } },
-    create: { distributorId, clientId, amcCode, folioNumber, schemeCode, arnProfileId },
-    update: { arnProfileId },
+    create: { distributorId, clientId, amcCode, folioNumber, schemeCode, arnProfileId, ...extra },
+    update: { arnProfileId, ...extra },
   });
   return folio.id;
 }
@@ -29,6 +38,8 @@ interface TransactionClientFolioParams {
   amcCode: string;
   folioNumber: string;
   schemeCode: string;
+  schemeName?: string;
+  assetClass?: string;
 }
 
 /**
@@ -50,7 +61,8 @@ interface TransactionClientFolioParams {
 export async function resolveClientAndFolioId(
   params: TransactionClientFolioParams,
 ): Promise<{ clientId: string; folioId: string }> {
-  const { distributorId, arnProfileId, panNumber, investorName, amcCode, folioNumber, schemeCode } = params;
+  const { distributorId, arnProfileId, panNumber, investorName, amcCode, folioNumber, schemeCode, schemeName, assetClass } =
+    params;
 
   if (panNumber) {
     const client = await prisma.client.upsert({
@@ -58,7 +70,16 @@ export async function resolveClientAndFolioId(
       create: { distributorId, panNumber, name: investorName ?? "Unknown" },
       update: {},
     });
-    const folioId = await upsertFolioRow(distributorId, client.id, amcCode, folioNumber, schemeCode, arnProfileId);
+    const folioId = await upsertFolioRow(
+      distributorId,
+      client.id,
+      amcCode,
+      folioNumber,
+      schemeCode,
+      arnProfileId,
+      schemeName,
+      assetClass,
+    );
     return { clientId: client.id, folioId };
   }
 
@@ -66,14 +87,19 @@ export async function resolveClientAndFolioId(
     where: { distributorId_amcCode_folioNumber_schemeCode: { distributorId, amcCode, folioNumber, schemeCode } },
   });
   if (existingFolio) {
-    if (arnProfileId && existingFolio.arnProfileId !== arnProfileId) {
-      await prisma.folio.update({ where: { id: existingFolio.id }, data: { arnProfileId } });
+    const extra = {
+      ...(arnProfileId && existingFolio.arnProfileId !== arnProfileId ? { arnProfileId } : {}),
+      ...(schemeName ? { schemeName } : {}),
+      ...(assetClass ? { assetClass } : {}),
+    };
+    if (Object.keys(extra).length > 0) {
+      await prisma.folio.update({ where: { id: existingFolio.id }, data: extra });
     }
     return { clientId: existingFolio.clientId, folioId: existingFolio.id };
   }
   const client = await prisma.client.create({ data: { distributorId, name: investorName ?? "Unknown" } });
   const folio = await prisma.folio.create({
-    data: { distributorId, clientId: client.id, amcCode, folioNumber, schemeCode, arnProfileId },
+    data: { distributorId, clientId: client.id, amcCode, folioNumber, schemeCode, arnProfileId, schemeName, assetClass },
   });
   return { clientId: client.id, folioId: folio.id };
 }
@@ -89,6 +115,13 @@ interface InvestorMasterClientFolioParams {
   amcCode?: string;
   folioNumber: string;
   productCode?: string;
+  address1?: string;
+  address2?: string;
+  city?: string;
+  pincode?: string;
+  taxStatus?: string;
+  bankAccountNumber?: string;
+  bankName?: string;
 }
 
 /**
@@ -117,12 +150,26 @@ export async function upsertInvestorMasterClientAndFolio(
     amcCode,
     folioNumber,
     productCode,
+    address1,
+    address2,
+    city,
+    pincode,
+    taxStatus,
+    bankAccountNumber,
+    bankName,
   } = params;
   const clientData = {
     name: investorName,
     email: email ?? null,
     phone: mobile ?? null,
     dateOfBirth: dateOfBirth ?? null,
+    address1: address1 ?? null,
+    address2: address2 ?? null,
+    city: city ?? null,
+    pincode: pincode ?? null,
+    taxStatus: taxStatus ?? null,
+    bankAccountNumber: bankAccountNumber ?? null,
+    bankName: bankName ?? null,
   };
 
   if (panNumber) {
