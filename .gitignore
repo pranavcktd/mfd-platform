@@ -10,3 +10,7 @@ coverage/
 Thumbs.db
 packages/db/generated/
 dump.rdb
+
+# Real client PII, real RTA zip passwords (NOTES.txt), real sample exports —
+# never committed, per explicit project decision.
+basic data/

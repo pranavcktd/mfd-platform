@@ -4,6 +4,7 @@ import { apiClient, clearAccessToken, getAccessToken, setAccessToken } from "../
 
 interface LoginResponse {
   accessToken: string;
+  mustChangePassword: boolean;
 }
 
 interface Me {
@@ -11,6 +12,7 @@ interface Me {
   name: string;
   email: string;
   createdAt: string;
+  mustChangePassword: boolean;
 }
 
 export function useLogin() {
@@ -23,7 +25,7 @@ export function useLogin() {
     onSuccess: (data) => {
       setAccessToken(data.accessToken);
       queryClient.invalidateQueries({ queryKey: ["me"] });
-      navigate("/");
+      navigate(data.mustChangePassword ? "/change-password" : "/");
     },
   });
 }
@@ -34,6 +36,19 @@ export function useMe() {
     queryFn: () => apiClient.get<Me>("/me"),
     enabled: Boolean(getAccessToken()),
     retry: false,
+  });
+}
+
+export function useChangePassword() {
+  const queryClient = useQueryClient();
+  const navigate = useNavigate();
+  return useMutation({
+    mutationFn: (input: { currentPassword: string; newPassword: string }) =>
+      apiClient.patch("/auth/change-password", input),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["me"] });
+      navigate("/");
+    },
   });
 }
 

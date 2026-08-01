@@ -12,10 +12,16 @@ import "reflect-metadata";
 import { NestFactory } from "@nestjs/core";
 import { ValidationPipe } from "@nestjs/common";
 import { AppModule } from "./app.module";
+import { AdminAuthService } from "./admin-auth/admin-auth.service";
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
+
+  // Idempotent — only creates the single seeded "Admin" row if the table is
+  // empty, so this is safe to run on every boot.
+  await app.get(AdminAuthService).ensureSeeded();
+
   const port = process.env.API_PORT ?? 3000;
   await app.listen(port);
   // eslint-disable-next-line no-console

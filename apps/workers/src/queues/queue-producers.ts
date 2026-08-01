@@ -5,6 +5,7 @@ import type { MailIngestionJobData } from "../processors/mail-ingestion.processo
 import type { ArchiveDecryptionJobData } from "../processors/archive-decryption.processor";
 import type { SchemaMappingJobData } from "../processors/schema-mapping.processor";
 import type { AnalyticsCalcJobData } from "../processors/analytics-calc.processor";
+import type { SyncHealthCheckJobData } from "../processors/sync-health-check.processor";
 
 /**
  * Producer-side Queue handles, separate from the Worker (consumer) side in
@@ -45,4 +46,9 @@ export function schemaMappingQueue(): Queue<SchemaMappingJobData> {
 let _analyticsCalcQueue: Queue<AnalyticsCalcJobData> | undefined;
 export function analyticsCalcQueue(): Queue<AnalyticsCalcJobData> {
   return (_analyticsCalcQueue ??= new Queue(QueueNames.ANALYTICS_CALC, { connection: getConnection() }));
+}
+
+let _syncHealthCheckQueue: Queue<SyncHealthCheckJobData> | undefined;
+export function syncHealthCheckQueue(): Queue<SyncHealthCheckJobData> {
+  return (_syncHealthCheckQueue ??= new Queue(QueueNames.SYNC_HEALTH_CHECK, { connection: getConnection() }));
 }

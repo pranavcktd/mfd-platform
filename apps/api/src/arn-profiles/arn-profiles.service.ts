@@ -24,16 +24,14 @@ export class ArnProfilesService {
     }
     const { ciphertext, iv, authTag } = encryptSecret(JSON.stringify(dto.payload), encryptionKey);
 
-    const saved = await prisma.externalCredential.upsert({
-      where: { arnProfileId_provider: { arnProfileId, provider: dto.provider } },
-      create: {
+    // Always inserts a new row rather than overwriting the existing one —
+    // see the ExternalCredential model doc comment: RTA zip passwords
+    // rotate over time, and the old value can still be needed for older
+    // archives, so nothing is ever discarded.
+    const saved = await prisma.externalCredential.create({
+      data: {
         arnProfileId,
         provider: dto.provider,
-        encryptedPayload: ciphertext,
-        encryptionIv: iv,
-        encryptionAuthTag: authTag,
-      },
-      update: {
         encryptedPayload: ciphertext,
         encryptionIv: iv,
         encryptionAuthTag: authTag,

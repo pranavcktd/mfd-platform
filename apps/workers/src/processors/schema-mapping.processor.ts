@@ -7,6 +7,10 @@ import {
   mapInvestorMasterRecord,
   mapClientAumRecord,
   mapSipRegistrationRecord,
+  mapKycStatusRecord,
+  mapBrokerageWithheldRecord,
+  mapSipExpiryRecord,
+  mapSchemeMasterRecord,
 } from "@mfd/shared";
 import { readDbfRecords } from "../parsing/dbf-reader";
 import { readDelimitedRecords } from "../parsing/delimited-reader";
@@ -15,6 +19,9 @@ import {
   upsertInvestorMasterClientAndFolio,
   updateFolioBalance,
   upsertSipRegistration,
+  updateFolioKycStatus,
+  findFolioIdBestEffort,
+  upsertSchemeMasterRows,
 } from "../crm-sync";
 import { resolveTenantFromRecords, type ResolvedTenant } from "../tenant-resolution";
 
@@ -144,14 +151,32 @@ async function runSchemaMapping(args: {
     );
   }
 
+  // SCHEME_MASTER is a GLOBAL, non-tenant-scoped catalog (see scheme-master.ts's
+  // doc comment) — no ARN code exists anywhere in the report to resolve a
+  // distributor from, so it can't go through resolveTenant/the ledger at all.
+  // Bypasses the rest of this function entirely.
+  if (reportCode === "SCHEME_MASTER") {
+    const normalized = rawRecords.map((raw) => mapSchemeMasterRecord(raw));
+    const upserted = await upsertSchemeMasterRows(normalized);
+    if (mailLogId) {
+      await prisma.mailIngestionLog.update({
+        where: { id: mailLogId },
+        data: { status: "COMPLETED", reportCode, rowsInserted: upserted, distributorId: expectedDistributorId },
+      });
+    }
+    return { inserted: upserted };
+  }
+
   let rows: LedgerRow[];
   let resolvedDistributorId: string | undefined;
+  let resolvedArnProfileId: string | undefined;
 
   switch (reportCode) {
     case "MFSD201": {
       const normalized = rawRecords.map((raw) => mapMfsd201Record(raw, sourceFormat, rtaType));
       const { distributorId, arnProfileId } = await resolveTenant(normalized, expectedDistributorId);
       resolvedDistributorId = distributorId;
+      resolvedArnProfileId = arnProfileId;
 
       rows = normalized.map((r) => ({
         distributorId,
@@ -201,6 +226,7 @@ async function runSchemaMapping(args: {
             schemeCode: r.productCode,
             schemeName: r.schemeDescription,
             assetClass: r.assetClass,
+            rtaType,
           });
           folioCache.set(key, cached);
         }
@@ -222,6 +248,8 @@ async function runSchemaMapping(args: {
           navPerUnit: r.navPerUnit,
           brokeragePercent: r.brokeragePercent,
           brokerageAmount: r.brokerageAmount,
+          isRejection: r.isRejection,
+          transactionTypeCode: r.transactionTypeCode,
           idempotencyHash: rows[i].idempotencyHash,
         });
       }
@@ -232,6 +260,7 @@ async function runSchemaMapping(args: {
       const normalized = rawRecords.map((raw) => mapInvestorMasterRecord(raw, rtaType));
       const { distributorId, arnProfileId } = await resolveTenant(normalized, expectedDistributorId);
       resolvedDistributorId = distributorId;
+      resolvedArnProfileId = arnProfileId;
 
       rows = normalized.map((r) => ({
         distributorId,
@@ -269,6 +298,7 @@ async function runSchemaMapping(args: {
           taxStatus: r.taxStatus,
           bankAccountNumber: r.bankAccountNumber,
           bankName: r.bankName,
+          rtaType,
         });
       }
       break;
@@ -277,6 +307,7 @@ async function runSchemaMapping(args: {
       const normalized = rawRecords.map((raw) => mapClientAumRecord(raw, rtaType));
       const { distributorId, arnProfileId } = await resolveTenant(normalized, expectedDistributorId);
       resolvedDistributorId = distributorId;
+      resolvedArnProfileId = arnProfileId;
 
       rows = normalized.map((r) => ({
         distributorId,
@@ -304,6 +335,7 @@ async function runSchemaMapping(args: {
           folioNumber: r.folioNumber,
           schemeCode: r.productCode,
           schemeName: r.schemeDescription,
+          rtaType,
         });
         await updateFolioBalance({
           folioId,
@@ -319,6 +351,7 @@ async function runSchemaMapping(args: {
       const normalized = rawRecords.map((raw) => mapSipRegistrationRecord(raw, rtaType));
       const { distributorId, arnProfileId } = await resolveTenant(normalized, expectedDistributorId);
       resolvedDistributorId = distributorId;
+      resolvedArnProfileId = arnProfileId;
 
       rows = normalized.map((r) => ({
         distributorId,
@@ -381,6 +414,174 @@ async function runSchemaMapping(args: {
       }
       break;
     }
+    case "KYC_STATUS": {
+      const normalized = rawRecords.map((raw) => mapKycStatusRecord(raw));
+      const { distributorId, arnProfileId } = await resolveTenant(normalized, expectedDistributorId);
+      resolvedDistributorId = distributorId;
+      resolvedArnProfileId = arnProfileId;
+
+      rows = normalized.map((r) => ({
+        distributorId,
+        rtaType,
+        reportCode,
+        investorPan: r.investorPan,
+        folioNumber: r.folioNumber,
+        amcCode: r.amcCode,
+        transactionDate: r.reportDate,
+        rawStructuredPayload: toJsonPayload(r),
+        // A periodically-refreshed snapshot, not an immutable event — the
+        // same folio's status re-reported on a later date is a genuinely
+        // new ledger row (audit trail), while the Folio table itself only
+        // ever holds the latest (see updateFolioKycStatus's newer-date guard).
+        idempotencyHash: hash([distributorId, r.folioNumber, r.amcCode, r.reportDate?.toISOString()]),
+      }));
+
+      for (const r of normalized) {
+        await updateFolioKycStatus({
+          distributorId,
+          amcCode: r.amcCode,
+          folioNumber: r.folioNumber,
+          kycStatus: r.kycStatus,
+          kycStatusDescription: r.kycStatusDescription,
+          aadhaarStatus: r.aadhaarStatus,
+          reportDate: r.reportDate,
+        });
+      }
+      break;
+    }
+    case "BROKERAGE_WITHHELD": {
+      const normalized = rawRecords.map((raw) => mapBrokerageWithheldRecord(raw));
+      const { distributorId, arnProfileId } = await resolveTenant(normalized, expectedDistributorId);
+      resolvedDistributorId = distributorId;
+      resolvedArnProfileId = arnProfileId;
+
+      rows = normalized.map((r) => ({
+        distributorId,
+        rtaType,
+        reportCode,
+        investorPan: r.investorPan,
+        folioNumber: r.folioNumber,
+        amcCode: r.amcCode,
+        schemeCode: r.schemeCode,
+        transactionDate: r.reportDate,
+        rawStructuredPayload: toJsonPayload(r),
+        // folioNumber+transactionNumber+reportDate alone collides — confirmed
+        // against real data (direct duplicate-key check, not assumed): the
+        // SAME transaction genuinely carries several separate withheld-amount
+        // rows, one per processedDate (monthly trail-fee accrual cycles),
+        // each with a distinct trailFeeWithheld value. processedDate is the
+        // real distinguishing field, not scheme (a first attempt at fixing
+        // this added amcCode+schemeCode, which was still wrong — verified by
+        // re-checking the actual raw records rather than assuming the fix
+        // worked). Same "don't trust an under-specified compound key without
+        // testing it against real data" lesson as mfsd201's transaction hash.
+        idempotencyHash: hash([
+          distributorId,
+          r.folioNumber,
+          r.transactionNumber,
+          r.amcCode,
+          r.schemeCode,
+          r.processedDate?.toISOString(),
+          r.reportDate?.toISOString(),
+        ]),
+      }));
+
+      const folioIdCache = new Map<string, Promise<string | null>>();
+      for (let i = 0; i < normalized.length; i++) {
+        const r = normalized[i];
+        const cacheKey = `${r.amcCode ?? ""}|${r.folioNumber}`;
+        let folioIdPromise = folioIdCache.get(cacheKey);
+        if (!folioIdPromise) {
+          folioIdPromise = findFolioIdBestEffort(distributorId, r.folioNumber, r.amcCode);
+          folioIdCache.set(cacheKey, folioIdPromise);
+        }
+        const folioId = await folioIdPromise;
+        if (!r.reportDate) continue; // reportDate is NOT NULL on BrokerageWithheld — skip rows missing it
+        await prisma.brokerageWithheld.upsert({
+          where: { idempotencyHash: rows[i].idempotencyHash },
+          create: {
+            distributorId,
+            arnProfileId,
+            folioId,
+            folioNumber: r.folioNumber,
+            transactionNumber: r.transactionNumber,
+            investorName: r.investorName,
+            investorPan: r.investorPan,
+            amcCode: r.amcCode,
+            schemeCode: r.schemeCode,
+            kycStatusAtWithholding: r.kycStatusAtWithholding,
+            trailFeeWithheld: r.trailFeeWithheld,
+            transactionIncentiveWithheld: r.transactionIncentiveWithheld,
+            upfrontWithheld: r.upfrontWithheld,
+            processedDate: r.processedDate,
+            reportDate: r.reportDate,
+            idempotencyHash: rows[i].idempotencyHash,
+          },
+          update: {},
+        });
+      }
+      break;
+    }
+    case "SIP_EXPIRY": {
+      const normalized = rawRecords.map((raw) => mapSipExpiryRecord(raw));
+      const { distributorId, arnProfileId } = await resolveTenant(normalized, expectedDistributorId);
+      resolvedDistributorId = distributorId;
+      resolvedArnProfileId = arnProfileId;
+
+      rows = normalized.map((r) => ({
+        distributorId,
+        rtaType,
+        reportCode,
+        folioNumber: r.folioNumber,
+        amcCode: r.amcCode,
+        transactionDate: r.expiryDate,
+        rawStructuredPayload: toJsonPayload(r),
+        // No reportDate exists on this report at all (see sip-expiry.ts) —
+        // refNumber + expiryDate + schemeName + transactionType + amount is
+        // the stable natural key instead.
+        idempotencyHash: hash([
+          distributorId,
+          r.folioNumber,
+          r.refNumber,
+          r.expiryDate?.toISOString(),
+          r.schemeName,
+          r.transactionType,
+          r.amount,
+        ]),
+      }));
+
+      const folioIdCache = new Map<string, Promise<string | null>>();
+      for (let i = 0; i < normalized.length; i++) {
+        const r = normalized[i];
+        let folioIdPromise = folioIdCache.get(r.folioNumber);
+        if (!folioIdPromise) {
+          folioIdPromise = findFolioIdBestEffort(distributorId, r.folioNumber, r.amcCode);
+          folioIdCache.set(r.folioNumber, folioIdPromise);
+        }
+        const folioId = await folioIdPromise;
+        await prisma.rtaSystematicExpiry.upsert({
+          where: { idempotencyHash: rows[i].idempotencyHash },
+          create: {
+            distributorId,
+            arnProfileId,
+            folioId,
+            folioNumber: r.folioNumber,
+            refNumber: r.refNumber,
+            investorName: r.investorName,
+            schemeName: r.schemeName,
+            toSchemeName: r.toSchemeName,
+            transactionType: r.transactionType,
+            amount: r.amount,
+            units: r.units,
+            expiryDate: r.expiryDate,
+            taxStatus: r.taxStatus,
+            idempotencyHash: rows[i].idempotencyHash,
+          },
+          update: {},
+        });
+      }
+      break;
+    }
   }
 
   const result = await prisma.rtaInsightLedger.createMany({ data: rows, skipDuplicates: true });
@@ -393,6 +594,7 @@ async function runSchemaMapping(args: {
         reportCode,
         rowsInserted: result.count,
         distributorId: resolvedDistributorId,
+        arnProfileId: resolvedArnProfileId,
       },
     });
   }

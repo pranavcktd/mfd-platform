@@ -10,6 +10,8 @@ import {
   UploadCloud,
   FileText,
   Wrench,
+  KeyRound,
+  UsersRound,
 } from "lucide-react";
 
 export interface NavItem {
@@ -24,10 +26,12 @@ export const NAV_ITEMS: NavItem[] = [
   { label: "Analysis", path: "/analysis", icon: LineChart },
   { label: "Brokerage", path: "/brokerage", icon: Percent },
   { label: "CRM", path: "/crm", icon: Users },
+  { label: "Family Master", path: "/crm/families", icon: UsersRound },
   { label: "MIS", path: "/mis", icon: FileWarning },
   { label: "Online Transaction", path: "/online-transaction", icon: ArrowLeftRight, comingSoon: true },
   { label: "Other Assets", path: "/other-assets", icon: Wallet },
-  { label: "Import External Data", path: "/import-external-data", icon: UploadCloud, comingSoon: true },
+  { label: "Import External Data", path: "/import-external-data", icon: UploadCloud },
   { label: "Reports", path: "/reports", icon: FileText },
   { label: "Tools", path: "/tools", icon: Wrench },
+  { label: "RTA Sync Settings", path: "/settings/rta-sync", icon: KeyRound },
 ];

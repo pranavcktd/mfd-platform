@@ -7,9 +7,16 @@ export interface DashboardSummary {
   nonPanClients: number;
   monthlySipValue: string;
   activeSips: number;
-  topAmcs: Array<{ amcCode: string; sampleSchemeName: string | null; aum: string }>;
+  topAmcs: Array<{ amcCode: string; amcName: string; aum: string }>;
   topClients: Array<{ name: string; aum: string }>;
-  recentClients: Array<{ name: string; transactionType: string | null; date: string }>;
+}
+
+export interface RecentClientRow {
+  id: string;
+  name: string;
+  panNumber: string | null;
+  createdAt: string;
+  arnNumbers: string[];
 }
 
 export interface ArnProfile {
@@ -28,6 +35,19 @@ export function useDashboardSummary(arnProfileIds: string[]) {
       apiClient.get<DashboardSummary>(
         arnProfileIds.length > 0 ? `/dashboard/summary?arnProfileIds=${arnProfileIds.join(",")}` : "/dashboard/summary",
       ),
+  });
+}
+
+export function useRecentClients(arnProfileIds: string[], page: number) {
+  return useQuery({
+    queryKey: ["dashboard-recent-clients", [...arnProfileIds].sort(), page],
+    queryFn: () => {
+      const params = new URLSearchParams({ page: String(page) });
+      if (arnProfileIds.length > 0) params.set("arnProfileIds", arnProfileIds.join(","));
+      return apiClient.get<{ total: number; page: number; pageSize: number; clients: RecentClientRow[] }>(
+        `/dashboard/recent-clients?${params.toString()}`,
+      );
+    },
   });
 }
 

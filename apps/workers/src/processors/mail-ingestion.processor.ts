@@ -25,15 +25,17 @@ function requireImapConfig() {
  * against the ARN code embedded in the parsed report data, never trusted
  * alone (see tenant-resolution.ts).
  */
-async function matchRecipientToDistributor(toAddresses: string[]): Promise<string | undefined> {
+async function matchRecipientToDistributor(
+  toAddresses: string[],
+): Promise<{ distributorId: string; arnProfileId: string } | undefined> {
   if (toAddresses.length === 0) {
     return undefined;
   }
   const arnProfile = await prisma.arnProfile.findFirst({
     where: { camsMailId: { in: toAddresses.map((a) => a.toLowerCase()) } },
-    select: { distributorId: true },
+    select: { id: true, distributorId: true },
   });
-  return arnProfile?.distributorId;
+  return arnProfile ? { distributorId: arnProfile.distributorId, arnProfileId: arnProfile.id } : undefined;
 }
 
 /**
@@ -91,7 +93,14 @@ export async function processMailIngestion(_job: Job<MailIngestionJobData>) {
       // are also intentionally left \Seen=false here (only the cheap
       // envelope scan touches them), so this stays safe to re-run on every
       // poll without the backlog compounding.
-      const candidates: Array<{ uid: number; rta: "CAMS" | "KFINTECH"; fromAddress: string; subject?: string; receivedAt?: Date }> = [];
+      const candidates: Array<{
+        uid: number;
+        rta: "CAMS" | "KFINTECH";
+        fromAddress: string;
+        subject?: string;
+        receivedAt?: Date;
+        messageId?: string;
+      }> = [];
       for await (const message of client.fetch({ seen: false }, { envelope: true, uid: true })) {
         const fromAddress = message.envelope?.from?.[0]?.address ?? "";
         const rta = identifyRtaSender(fromAddress);
@@ -105,6 +114,11 @@ export async function processMailIngestion(_job: Job<MailIngestionJobData>) {
           fromAddress,
           subject: message.envelope?.subject ?? undefined,
           receivedAt: message.envelope?.date ?? undefined,
+          // Captured here (envelope-only, cheap) rather than only from the
+          // later full-body parse, so it's present even on rows that fail
+          // before body-parsing ever runs — see the MailIngestionLog.messageId
+          // doc comment for why this exists (manual Gmail lookup on failure).
+          messageId: message.envelope?.messageId ?? undefined,
         });
       }
 
@@ -119,6 +133,7 @@ export async function processMailIngestion(_job: Job<MailIngestionJobData>) {
             fromAddress: candidate.fromAddress,
             subject: candidate.subject,
             receivedAt: candidate.receivedAt,
+            messageId: candidate.messageId,
             status: "NO_LINK",
           },
         });
@@ -142,16 +157,21 @@ export async function processMailIngestion(_job: Job<MailIngestionJobData>) {
           const toAddresses = (Array.isArray(parsed.to) ? parsed.to : parsed.to ? [parsed.to] : [])
             .flatMap((addr) => addr.value.map((v) => v.address))
             .filter((a): a is string => Boolean(a));
-          const expectedDistributorId = await matchRecipientToDistributor(toAddresses);
+          const headerMatch = await matchRecipientToDistributor(toAddresses);
 
           await prisma.mailIngestionLog.update({
             where: { id: mailLog.id },
-            data: { downloadUrl, status: "ENQUEUED", distributorId: expectedDistributorId },
+            data: {
+              downloadUrl,
+              status: "ENQUEUED",
+              distributorId: headerMatch?.distributorId,
+              arnProfileId: headerMatch?.arnProfileId,
+            },
           });
           await archiveDecryptionQueue().add("archive-decryption", {
             downloadUrl,
             rtaType: candidate.rta,
-            expectedDistributorId,
+            expectedDistributorId: headerMatch?.distributorId,
             mailLogId: mailLog.id,
           });
           enqueued++;

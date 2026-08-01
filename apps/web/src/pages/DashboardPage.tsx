@@ -1,26 +1,31 @@
 import { useState } from "react";
-import { Wallet, Users, UserX, Repeat, TrendingUp, Newspaper, ExternalLink } from "lucide-react";
+import { Link } from "react-router-dom";
+import { Wallet, Users, UserX, Repeat, TrendingUp, Newspaper, ExternalLink, LayoutDashboard } from "lucide-react";
 import { StatTile } from "../components/ui/StatTile";
+import { PageHeader } from "../components/ui/PageHeader";
 import { Card } from "../components/ui/Card";
 import { ArnFilter } from "../components/ui/ArnFilter";
-import { useArnProfiles, useDashboardSummary } from "../hooks/useDashboard";
-import { formatCount, formatDate, formatInrCompact } from "../lib/format";
+import { Amount } from "../components/ui/Amount";
+import { Pager } from "../components/ui/Pager";
+import { useArnProfiles, useDashboardSummary, useRecentClients } from "../hooks/useDashboard";
+import { formatCount, formatDate, formatInrCompact, formatInrExact } from "../lib/format";
 import { mockNotices } from "../lib/mock-dashboard-data";
 
 export function DashboardPage() {
   const [selectedArnIds, setSelectedArnIds] = useState<string[]>([]);
+  const [recentPage, setRecentPage] = useState(1);
   const { data: arnProfiles } = useArnProfiles();
   const { data, isLoading, isError } = useDashboardSummary(selectedArnIds);
+  const { data: recentClients, isLoading: recentLoading } = useRecentClients(selectedArnIds, recentPage);
 
   return (
     <div className="space-y-6">
       <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-lg font-semibold text-ink">Dashboard</h1>
+        <PageHeader icon={LayoutDashboard} accent="series-1" title="Dashboard">
           <p className="text-sm text-ink-secondary">
             {isError ? "Could not load live data." : "Live data from your onboarded RTA feeds."}
           </p>
-        </div>
+        </PageHeader>
         {arnProfiles && (
           <ArnFilter arnProfiles={arnProfiles} selectedIds={selectedArnIds} onChange={setSelectedArnIds} />
         )}
@@ -30,6 +35,7 @@ export function DashboardPage() {
         <StatTile
           label="Total AUM"
           value={isLoading || !data ? "—" : formatInrCompact(data.totalAum)}
+          subValue={isLoading || !data ? undefined : formatInrExact(data.totalAum)}
           icon={Wallet}
           accent="series-1"
           href="/reports"
@@ -51,6 +57,7 @@ export function DashboardPage() {
         <StatTile
           label="Active SIP Value"
           value={isLoading || !data ? "—" : formatInrCompact(data.monthlySipValue)}
+          subValue={isLoading || !data ? undefined : formatInrExact(data.monthlySipValue)}
           icon={TrendingUp}
           accent="series-5"
           href="/reports"
@@ -71,11 +78,8 @@ export function DashboardPage() {
               {data?.topAmcs.length ? (
                 data.topAmcs.map((amc) => (
                   <li key={amc.amcCode} className="flex items-center justify-between py-2 text-sm">
-                    <span className="text-ink">
-                      {amc.sampleSchemeName ? amc.sampleSchemeName.split(" - ")[0] : amc.amcCode}
-                      <span className="ml-1 text-xs text-ink-muted">({amc.amcCode})</span>
-                    </span>
-                    <span className="tabular-nums text-ink-secondary">{formatInrCompact(amc.aum)}</span>
+                    <span className="text-ink">{amc.amcName}</span>
+                    <Amount value={amc.aum} className="tabular-nums text-ink-secondary" />
                   </li>
                 ))
               ) : (
@@ -90,7 +94,7 @@ export function DashboardPage() {
                 data.topClients.map((client) => (
                   <li key={client.name} className="flex items-center justify-between py-2 text-sm">
                     <span className="text-ink">{client.name}</span>
-                    <span className="tabular-nums text-ink-secondary">{formatInrCompact(client.aum)}</span>
+                    <Amount value={client.aum} className="tabular-nums text-ink-secondary" />
                   </li>
                 ))
               ) : (
@@ -100,19 +104,21 @@ export function DashboardPage() {
           </Card>
 
           <Card title="Newly Added Clients">
+            <p className="mb-2 text-xs text-ink-muted">Sorted by onboarding date, newest first — which ARN(s) each client's folios belong to.</p>
             <ul className="divide-y divide-[var(--gridline)]">
-              {data?.recentClients.length ? (
-                data.recentClients.map((client) => (
-                  <li key={client.name} className="flex items-center justify-between py-2 text-sm">
-                    <span className="text-ink">{client.name}</span>
-                    <span className="text-ink-secondary">{client.transactionType ?? "—"}</span>
-                    <span className="tabular-nums text-ink-muted">{formatDate(client.date)}</span>
-                  </li>
-                ))
-              ) : (
-                <li className="py-2 text-sm text-ink-muted">{isLoading ? "Loading…" : "No data yet."}</li>
-              )}
+              {recentLoading && <li className="py-2 text-sm text-ink-muted">Loading…</li>}
+              {recentClients?.clients.length === 0 && <li className="py-2 text-sm text-ink-muted">No data yet.</li>}
+              {recentClients?.clients.map((client) => (
+                <li key={client.id} className="flex items-center justify-between py-2 text-sm">
+                  <Link to={`/crm/${client.id}`} className="text-series-1 hover:underline">{client.name}</Link>
+                  <span className="text-ink-secondary">
+                    {client.arnNumbers.length > 0 ? client.arnNumbers.map((a) => `ARN-${a}`).join(", ") : "Not yet attributed"}
+                  </span>
+                  <span className="tabular-nums text-ink-muted">{formatDate(client.createdAt)}</span>
+                </li>
+              ))}
             </ul>
+            {recentClients && <Pager page={recentPage} setPage={setRecentPage} total={recentClients.total} pageSize={recentClients.pageSize} />}
           </Card>
         </div>
 

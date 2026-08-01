@@ -8,7 +8,7 @@ export class ProfileController {
   getProfile() {
     return prisma.distributor.findUniqueOrThrow({
       where: { id: TenantContext.currentDistributorId() },
-      select: { id: true, name: true, email: true, createdAt: true },
+      select: { id: true, name: true, email: true, createdAt: true, mustChangePassword: true },
     });
   }
 }

@@ -16,6 +16,15 @@ model Distributor {
   email             String             @unique
   passwordHash      String             @map("password_hash")
   inboundEmailAlias String             @unique @map("inbound_email_alias")
+  /// Super-admin kill switch for a tenant's login — checked in
+  /// AuthService.login. Distinct from ArnProfile-level RTA credentials;
+  /// this blocks dashboard access entirely, not just data sync.
+  isActive          Boolean            @default(true) @map("is_active")
+  /// Set true on every super-admin-driven onboarding/reset (default
+  /// password "Admin@123" is fixed and known) — forces a change-password
+  /// prompt on next login instead of silently accepting the default
+  /// forever. Cleared by AuthService.changePassword.
+  mustChangePassword Boolean           @default(true) @map("must_change_password")
   createdAt         DateTime           @default(now()) @map("created_at")
 
   arnProfiles       ArnProfile[]
@@ -27,6 +36,11 @@ model Distributor {
   ledgerEntries     RtaInsightLedger[]
   mailIngestionLogs MailIngestionLog[]
   otherAssets       OtherAsset[]
+  adminAuditLogs    AdminAuditLog[]
+  clientNominees    ClientNominee[]
+  clientBankAccounts ClientBankAccount[]
+  brokerageWithheldRows BrokerageWithheld[]
+  systematicExpiryRows  RtaSystematicExpiry[]
 
   @@map("distributors")
 }
@@ -65,6 +79,9 @@ model ArnProfile {
 
   credentials        ExternalCredential[]
   folios             Folio[]
+  mailIngestionLogs  MailIngestionLog[]
+  brokerageWithheldRows BrokerageWithheld[]
+  systematicExpiryRows  RtaSystematicExpiry[]
 
   @@index([distributorId])
   @@map("arn_profiles")
@@ -81,6 +98,15 @@ enum ExternalProvider {
 /// credentials, one row per ArnProfile per provider. encryptedPayload holds
 /// an AES-256-GCM ciphertext of a JSON blob (login id, password, etc.) —
 /// never store any of this in plaintext.
+/// Deliberately NOT unique on (arnProfileId, provider) — confirmed against
+/// real RTA archives (2026-07-23) that CAMS/KFintech reissue a new zip
+/// password each time report scheduling is set up, so an old password can
+/// still be the right one for an older archive even after a newer password
+/// becomes current for live mail. Every save inserts a NEW row rather than
+/// overwriting; nothing is ever deleted. Credential lookups (see
+/// apps/workers/src/credential-lookup.ts) try every row for a provider,
+/// newest first, until one decrypts — so password rotation is handled by
+/// trying history instead of guessing which single value is "the" password.
 model ExternalCredential {
   id                String           @id @default(uuid()) @db.Uuid
   arnProfileId      String           @map("arn_profile_id") @db.Uuid
@@ -94,7 +120,7 @@ model ExternalCredential {
   createdAt         DateTime         @default(now()) @map("created_at")
   updatedAt         DateTime         @updatedAt @map("updated_at")
 
-  @@unique([arnProfileId, provider])
+  @@index([arnProfileId, provider])
   @@map("external_credentials")
 }
 
@@ -155,6 +181,14 @@ model Family {
 
   clients        Client[]
 
+  /// The one client (must already be a member via Client.familyId) who gets
+  /// full visibility of every other member's details in their own client
+  /// portal login — everyone else in the family only sees their own data.
+  /// Nullable: a family can exist with members assigned before a head is
+  /// picked.
+  headClientId   String?     @unique @map("head_client_id") @db.Uuid
+  headClient     Client?     @relation("FamilyHead", fields: [headClientId], references: [id])
+
   @@index([distributorId])
   @@map("families")
 }
@@ -168,6 +202,9 @@ model Client {
 
   familyId       String?     @map("family_id") @db.Uuid
   family         Family?     @relation(fields: [familyId], references: [id])
+  /// Opposite side of Family.headClient — structural only, no direct app
+  /// logic reads this (queries go Family -> headClientId instead).
+  headOfFamily   Family?     @relation("FamilyHead")
 
   panNumber      String?     @map("pan_number")
   name           String
@@ -179,17 +216,62 @@ model Client {
   /// All of the below are real fields present in the RTA's investor-master
   /// report (CAMS WBR9 / KFintech MFSD211) that were parsed but never
   /// persisted before 2026-07-22 — captured in
-  /// RtaInsightLedger.rawStructuredPayload only, never queryable. Nominee is
-  /// deliberately NOT modeled here: neither RTA's investor-master export
-  /// (as ingested) carries a nominee field at all — this isn't a missed
-  /// mapping, the data genuinely isn't in what we receive.
+  /// RtaInsightLedger.rawStructuredPayload only, never queryable.
   address1          String?  @map("address1")
   address2          String?  @map("address2")
   city              String?
   pincode           String?
   taxStatus         String?  @map("tax_status")
+  /// The RTA-sourced primary bank account (CAMS WBR9 / KFintech MFSD211
+  /// carry exactly one bank mandate per investor) — always shown first.
+  /// Real investors can hold more than one bank account on file with the
+  /// AMC in practice; since no currently-ingested report carries more than
+  /// this single mandate, additional accounts are captured via the
+  /// separate ClientBankAccount table instead (MFD-entered, 2026-07-25).
   bankAccountNumber String?  @map("bank_account_number")
   bankName          String?  @map("bank_name")
+  bankAccounts      ClientBankAccount[]
+
+  /// Neither RTA's investor-master export carries a nominee field at all —
+  /// a genuine gap on the source side (see the schema history for
+  /// address/bank above). ClientNominee (2026-07-25) replaces the old
+  /// flat nomineeName/nomineeRelation pair — a folio can carry up to 3
+  /// real nominees under actual SEBI nomination rules, and an RTA-fed
+  /// nominee report is expected soon (see [[mfd_ingestion_engine]]), so
+  /// this needed to be a real list with a source flag from the start
+  /// rather than a single manually-maintained pair. No real nominee data
+  /// existed in this column at migration time (confirmed: 0/612 clients),
+  /// so there was nothing to carry over.
+  nominees        ClientNominee[]
+
+  /// Client-portal login (2026-07-23) — a distinct, separate auth surface
+  /// from the MFD's own Distributor login (see ClientAuthGuard). Not every
+  /// client has one: portalEnabled starts false, and the MFD turns it on
+  /// explicitly per-client (CrmService.createPortalLogin) since it requires
+  /// a real email on file to deliver the initial password to.
+  passwordHash       String?  @map("password_hash")
+  portalEnabled      Boolean  @default(false) @map("portal_enabled")
+  mustChangePassword Boolean  @default(true) @map("must_change_password")
+
+  /// Client-merge target (2026-07-23): when a duplicate/non-PAN client
+  /// turns out to be the same real investor as another Client row, this
+  /// points at the surviving row instead of deleting the merged-away one —
+  /// preserves the historical Transaction/RtaInsightLedger trail, which
+  /// still references the old folios (now reassigned to the target client,
+  /// see CrmService.mergeClients) unambiguously. Merged-away clients are
+  /// excluded from the default client list.
+  mergedIntoClientId String? @map("merged_into_client_id") @db.Uuid
+  mergedIntoClient   Client? @relation("ClientMerge", fields: [mergedIntoClientId], references: [id])
+  mergedFromClients  Client[] @relation("ClientMerge")
+
+  /// Set when a client is auto-created with only a PAN + name (e.g. by
+  /// CasImportService when a CAS folio's PAN doesn't match any existing
+  /// client) — surfaced as an MIS/CRM alert so the MFD knows to fill in
+  /// contact/address/bank details manually, since none of that came from
+  /// the source. Cleared by CrmService.markReviewed once the MFD has
+  /// actually looked at the record.
+  needsReview   Boolean  @default(false) @map("needs_review")
+  reviewReason  String?  @map("review_reason")
 
   createdAt      DateTime    @default(now()) @map("created_at")
 
@@ -204,6 +286,57 @@ model Client {
   @@map("clients")
 }
 
+/// One nominee on a client's record — a real client can have more than one
+/// (SEBI nomination rules allow up to 3 per folio), hence a real table
+/// instead of a flat name/relation pair. `source` distinguishes MFD manual
+/// entry from a future RTA-fed nominee report (not ingested yet, see
+/// [[mfd_ingestion_engine]]) so the UI can show provenance once that
+/// exists rather than silently mixing the two.
+model ClientNominee {
+  id             String      @id @default(uuid()) @db.Uuid
+  distributorId  String      @map("distributor_id") @db.Uuid
+  distributor    Distributor @relation(fields: [distributorId], references: [id])
+  clientId       String      @map("client_id") @db.Uuid
+  client         Client      @relation(fields: [clientId], references: [id])
+
+  nomineeName String  @map("nominee_name")
+  relation    String?
+  email       String?
+  mobile      String?
+  /// "MANUAL" (default, MFD-entered) or "RTA" (once a nominee report is
+  /// ingested — reserved for that, unused today).
+  source      String  @default("MANUAL")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([clientId])
+  @@map("client_nominees")
+}
+
+/// An additional bank account on a client's record, beyond the single
+/// RTA-sourced primary one on Client.bankAccountNumber/bankName — no
+/// currently-ingested RTA report carries more than one bank mandate per
+/// investor, so every row here is MFD-entered (`source` is reserved for a
+/// future RTA-fed multi-account report the same way ClientNominee's is).
+model ClientBankAccount {
+  id             String      @id @default(uuid()) @db.Uuid
+  distributorId  String      @map("distributor_id") @db.Uuid
+  distributor    Distributor @relation(fields: [distributorId], references: [id])
+  clientId       String      @map("client_id") @db.Uuid
+  client         Client      @relation(fields: [clientId], references: [id])
+
+  bankName      String  @map("bank_name")
+  accountNumber String  @map("account_number")
+  ifscCode      String? @map("ifsc_code")
+  branchName    String? @map("branch_name")
+  source        String  @default("MANUAL")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([clientId])
+  @@map("client_bank_accounts")
+}
+
 /// Manually-entered non-MF asset (real estate, FD, gold, direct equity, etc.)
 /// so a client's net worth isn't understated by only counting MF holdings.
 /// Never RTA-sourced — this is the one CRM-adjacent module that's genuinely
@@ -216,16 +349,64 @@ model OtherAsset {
   clientId       String      @map("client_id") @db.Uuid
   client         Client      @relation(fields: [clientId], references: [id])
 
+  /// One of EQUITY_SHARES / FIXED_DEPOSIT / INSURANCE / OTHER (2026-07-24
+  /// dynamic-form redesign) — the frontend renders a different set of
+  /// fields per type, all captured in `details` below. `value` stays the
+  /// single authoritative "current value" number regardless of type (net
+  /// worth / MIS reports sum this column unchanged), whether it's entered
+  /// directly (FD/Insurance/Other) or computed from details (equity:
+  /// quantity * currentPricePerUnit).
   assetType      String      @map("asset_type")
   description    String?
   value          Decimal     @db.Decimal(18, 2)
   asOfDate       DateTime    @map("as_of_date") @db.Date
+
+  /// Type-specific structured fields (see AssetDetails variants in
+  /// other-assets.service.ts) — e.g. for EQUITY_SHARES: stockId, quantity,
+  /// buyDate, buyPricePerUnit, currentPricePerUnit. A JSON column rather
+  /// than a wide sparse table of nullable columns, since each asset type
+  /// needs a genuinely different field set.
+  details        Json?
 
   createdAt      DateTime    @default(now()) @map("created_at")
   updatedAt      DateTime    @updatedAt @map("updated_at")
 
   @@index([distributorId, clientId])
   @@map("other_assets")
+}
+
+/// Global (not per-distributor) equity reference master, replacing the
+/// earlier "grows organically per-distributor" EquityStockMaster
+/// (2026-07-23) now that a real NSE+BSE listed-equity dataset exists
+/// (2026-07-24) — seeded from admin-supplied NSE_EQUITY_List /
+/// BSE_EQUITY_List files, joined on ISIN (see equity-isin-master-import
+/// module). Every MFD searches the SAME master (company name / NSE symbol
+/// / BSE scrip code / ISIN — the fuzzy-search spec this was built to),
+/// rather than each maintaining their own list from scratch. lastClosePrice
+/// /lastPriceDate come along for free from the BSE file (which is itself a
+/// daily Bhavcopy-shaped export, not just a static company list) — a first
+/// step toward the "nightly price update" automation described in the
+/// source spec, though that automation itself isn't built yet, only this
+/// one-time/periodic import.
+model EquityIsinMaster {
+  isin              String    @id
+  companyName       String    @map("company_name")
+  nseSymbol         String?   @map("nse_symbol")
+  bseScripCode      String?   @map("bse_scrip_code")
+  bseScripId        String?   @map("bse_scrip_id")
+  isTradedOnNse     Boolean   @default(false) @map("is_traded_on_nse")
+  isTradedOnBse     Boolean   @default(false) @map("is_traded_on_bse")
+  /// NSE preferred by default (higher liquidity) when a stock trades on
+  /// both, matching the source spec's stated priority logic.
+  preferredExchange String    @map("preferred_exchange")
+  lastClosePrice    Decimal?  @map("last_close_price") @db.Decimal(12, 4)
+  lastPriceDate     DateTime? @map("last_price_date") @db.Date
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  @@index([companyName])
+  @@index([nseSymbol])
+  @@index([bseScripCode])
+  @@map("equity_isin_master")
 }
 
 /// One client's holding in one scheme. arnProfileId records which ARN the
@@ -250,9 +431,10 @@ model Folio {
   /// KFintech's "Fund Description") — real data, e.g. "Aditya Birla Sun Life
   /// Large & Mid Cap Fund - Growth-Regular Plan". amcCode/schemeCode alone
   /// are short RTA-internal codes (single letters for CAMS, ~3-char for
-  /// KFintech) that mean nothing without this. Not an AMC-name lookup table
-  /// — no such reference file was available, so this stores exactly what
-  /// the RTA sent rather than a fabricated/guessed AMC display name.
+  /// KFintech) that mean nothing without this on their own — resolveAmcName
+  /// (packages/shared/src/amc-names.ts, added 2026-07-23) derives a real
+  /// AMC display name from this field for reporting, rather than showing
+  /// the bare code.
   schemeName     String?     @map("scheme_name")
   /// Asset class as sent by the RTA (CAMS's "SCHEME_TYP" e.g. "Equity(S)",
   /// KFintech's "AssetType") — enables real portfolio-composition analysis
@@ -269,14 +451,180 @@ model Folio {
   navPerUnit       Decimal?  @map("nav_per_unit") @db.Decimal(12, 4)
   balanceAsOfDate  DateTime? @map("balance_as_of_date") @db.Date
 
+  /// "RTA_MAILBACK" (default, existing convention — nothing about already-
+  /// ingested rows changes) or "CAS_IMPORT" (2026-07-24, Import External
+  /// Data module) — a CAS-sourced folio may belong to an AMC this MFD
+  /// doesn't hold an ARN for at all (arnProfileId stays null in that case),
+  /// surfaced so the CRM/reports UI can visibly mark it as "not managed by
+  /// you" rather than presenting it identically to a real serviced folio.
+  source         String      @default("RTA_MAILBACK")
+
+  /// "CAMS" or "KFINTECH" — which RTA actually assigned amcCode, captured
+  /// at ingestion (schema-mapping.processor.ts already knows this per
+  /// batch). Null for folios created before 2026-07-25 and for CAS-sourced
+  /// ones. Exists because amcCode alone is NOT a safe cross-RTA key: CAMS
+  /// and KFintech maintain separate, uncoordinated AMC-code systems and a
+  /// given code string can mean a different AMC in each (confirmed several
+  /// codes coincidentally agree, e.g. "128"=Axis in both, but that's not
+  /// guaranteed generally) — resolveDisplayAmcName only trusts KFintech's
+  /// real Fund-code table (packages/shared/src/kfintech-amc-codes.ts) when
+  /// this field says "KFINTECH", never guessed from the code's shape.
+  rtaType        String?     @map("rta_type")
+
+  /// From CAMS WBR56 ("KYC status of Investor") — the primary holder's raw
+  /// status code (e.g. "KYC OK"/"KYC Failed"), its plain-English description,
+  /// and Aadhaar-linking status (e.g. "Aadhar Linked"). Per-folio, not
+  /// per-client, matching the report's own scope — guardian/joint-holder
+  /// statuses from the same report aren't captured (primary holder only, for
+  /// now). Same "latest known snapshot, only overwritten by a newer report
+  /// date" convention as the balance fields above.
+  kycStatus            String?   @map("kyc_status")
+  kycStatusDescription String?   @map("kyc_status_description")
+  aadhaarStatus        String?   @map("aadhaar_status")
+  kycReportDate         DateTime? @map("kyc_report_date") @db.Date
+
   createdAt      DateTime    @default(now()) @map("created_at")
 
   transactions      Transaction[]
   sipRegistrations  SipRegistration[]
+  brokerageWithheldRows BrokerageWithheld[]
+  systematicExpiryRows  RtaSystematicExpiry[]
 
   @@unique([distributorId, amcCode, folioNumber, schemeCode])
   @@index([distributorId, clientId])
   @@map("folios")
+}
+
+/// From CAMS WBR56 ("KYC status of Investor") — real per-folio field
+/// layout confirmed 2026-07-27 against live mail (see mfd_ingestion_engine
+/// memory). Not yet wired into ingestion; schema only.
+/// From CAMS WBR95 ("Brokerage Withheld") — real per-folio brokerage that
+/// CAMS is withholding because that folio's KYC is invalid (confirmed
+/// against real data: every sample row had kycStatusAtWithholding ==
+/// "KYC Failed"). The three withheld-amount fields are named from CAMS's
+/// own raw column abbreviations (TF/TI/UPF) since no field-layout glossary
+/// exists for this report anywhere supplied so far — treat the exact
+/// business meaning of each as unconfirmed, shown as reported.
+model BrokerageWithheld {
+  id             String       @id @default(uuid()) @db.Uuid
+  distributorId  String       @map("distributor_id") @db.Uuid
+  distributor    Distributor  @relation(fields: [distributorId], references: [id])
+  arnProfileId   String?      @map("arn_profile_id") @db.Uuid
+  arnProfile     ArnProfile?  @relation(fields: [arnProfileId], references: [id])
+  folioId        String?      @map("folio_id") @db.Uuid
+  folio          Folio?       @relation(fields: [folioId], references: [id])
+
+  folioNumber           String    @map("folio_number")
+  transactionNumber     String?   @map("transaction_number")
+  investorName           String?  @map("investor_name")
+  investorPan            String?  @map("investor_pan")
+  amcCode                String?  @map("amc_code")
+  schemeCode             String?  @map("scheme_code")
+  kycStatusAtWithholding String?  @map("kyc_status_at_withholding")
+  /// CAMS raw field "TF" — best-effort label "Trail Fee Withheld", unconfirmed.
+  /// Precision widened past what the small real sample values suggested —
+  /// a real 2026-07-27 batch hit a numeric-overflow error on the original
+  /// Decimal(14,4), confirming some real rows carry far larger magnitudes.
+  trailFeeWithheld              Decimal? @map("trail_fee_withheld") @db.Decimal(20, 4)
+  /// CAMS raw field "TI" — meaning unconfirmed.
+  transactionIncentiveWithheld  Decimal? @map("transaction_incentive_withheld") @db.Decimal(20, 4)
+  /// CAMS raw field "UPF" — best-effort label "Upfront Withheld", unconfirmed.
+  upfrontWithheld                Decimal? @map("upfront_withheld") @db.Decimal(20, 4)
+  processedDate  DateTime? @map("processed_date") @db.Date
+  reportDate     DateTime  @map("report_date") @db.Date
+
+  idempotencyHash String   @unique @map("idempotency_hash")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@index([distributorId])
+  @@index([folioId])
+  @@map("brokerage_withheld")
+}
+
+/// From CAMS WBR5 ("A list of SIP Investors whose plans expire shortly") —
+/// the RTA's own authoritative expiring-systematic-registration list, a
+/// genuine upgrade over the existing SIP Expiring report (which only
+/// estimates from SipRegistration.endDate). Real sample data confirmed this
+/// also covers expiring STP/switch registrations (transactionType "SO"),
+/// not pure SIP alone.
+model RtaSystematicExpiry {
+  id             String       @id @default(uuid()) @db.Uuid
+  distributorId  String       @map("distributor_id") @db.Uuid
+  distributor    Distributor  @relation(fields: [distributorId], references: [id])
+  arnProfileId   String?      @map("arn_profile_id") @db.Uuid
+  arnProfile     ArnProfile?  @relation(fields: [arnProfileId], references: [id])
+  folioId        String?      @map("folio_id") @db.Uuid
+  folio          Folio?       @relation(fields: [folioId], references: [id])
+
+  folioNumber     String    @map("folio_number")
+  refNumber       String?   @map("ref_number")
+  investorName    String?   @map("investor_name")
+  schemeName      String?   @map("scheme_name")
+  toSchemeName    String?   @map("to_scheme_name")
+  /// Raw CAMS transaction-type code (e.g. "P" = SIP/Purchase-type
+  /// systematic plan, "SO" = Switch Out / STP leg) — not run through
+  /// resolveTransactionType, this report's own vocabulary is small and
+  /// distinct from the transaction report's.
+  transactionType String?   @map("transaction_type")
+  /// Widened past Decimal(14,2) — see BrokerageWithheld's doc comment,
+  /// same real-data overflow discovery applies here.
+  amount          Decimal?  @db.Decimal(20, 2)
+  units           Decimal?  @db.Decimal(18, 4)
+  expiryDate      DateTime? @map("expiry_date") @db.Date
+  taxStatus       String?   @map("tax_status")
+  /// Unlike every other report ingested so far, WBR5's real field layout
+  /// carries no report-generation-date field of its own (confirmed against
+  /// a real sample) — nullable rather than defaulted to "now", since a
+  /// fabricated processing-time value would make the idempotency hash
+  /// unstable across re-runs of the same source file.
+  reportDate      DateTime? @map("report_date") @db.Date
+
+  idempotencyHash String   @unique @map("idempotency_hash")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@index([distributorId])
+  @@map("rta_systematic_expiry")
+}
+
+/// From CAMS WBR39 ("Scheme details") — a GLOBAL, non-tenant-scoped
+/// industry-wide scheme catalog (every AMC's every scheme, not just ones
+/// any particular MFD holds), confirmed 2026-07-27 against a real 7,110-row
+/// export. No per-row ARN/broker code exists in this report at all, so it
+/// cannot go through the normal per-tenant resolveTenantFromRecords path —
+/// same "global reference table" shape as EquityIsinMaster, used to
+/// backfill/enrich asset-class and ISIN data on existing Folio rows rather
+/// than shown to end users directly.
+model SchemeMaster {
+  id                  String    @id @default(uuid()) @db.Uuid
+  amcCode             String    @map("amc_code")
+  amcName             String?   @map("amc_name")
+  schemeCode          String    @map("scheme_code")
+  schemeName          String    @map("scheme_name")
+  schemeType          String?   @map("scheme_type")
+  assetClass          String?   @map("asset_class")
+  sebiClassification  String?   @map("sebi_classification")
+  isin                String?
+  planType            String?   @map("plan_type")
+  sipAllowed          Boolean?  @map("sip_allowed")
+  swpAllowed          Boolean?  @map("swp_allowed")
+  stpAllowed          Boolean?  @map("stp_allowed")
+  closeEnded          Boolean?  @map("close_ended")
+  elssScheme          Boolean?  @map("elss_scheme")
+  /// Real WBR39 data confirmed some schemes carry absurd sentinel-style
+  /// "no real limit" values even in fields named as a minimum (e.g. a
+  /// min-amount field reporting 10^13+) — widened well past what a normal
+  /// minimum-investment figure would ever need, after a real batch hit a
+  /// numeric-overflow error on the original Decimal(14,2)/Decimal(10,2).
+  minSipAmount        Decimal?  @map("min_sip_amount") @db.Decimal(20, 2)
+  minPurchaseAmount   Decimal?  @map("min_purchase_amount") @db.Decimal(20, 2)
+  faceValue           Decimal?  @map("face_value") @db.Decimal(20, 2)
+  parentSchemeCode    String?   @map("parent_scheme_code")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+
+  @@unique([amcCode, schemeCode])
+  @@index([isin])
+  @@index([schemeName])
+  @@map("scheme_master")
 }
 
 /// A SIP/STP registration on a folio (CAMS WBR49 / KFintech MFSD243).
@@ -335,11 +683,28 @@ model MailIngestionLog {
   rtaType       String               @map("rta_type")
   fromAddress   String               @map("from_address")
   subject       String?
+  /// RFC822 Message-ID header, captured at the cheap envelope-only IMAP
+  /// scan (present even for rows that fail before body-parsing). Lets an
+  /// admin jump straight to the exact source email in Gmail
+  /// (lib/format.ts's gmailSearchLink) to manually inspect a failed mail's
+  /// real content — deliberately NOT storing the raw email body/attachment
+  /// itself in our own database (real client PII/financial data), per
+  /// explicit user decision (2026-07-23).
+  messageId     String?              @map("message_id")
   receivedAt    DateTime?            @map("received_at")
   downloadUrl   String?              @map("download_url")
   status        MailIngestionStatus
   distributorId String?              @map("distributor_id") @db.Uuid
   distributor   Distributor?         @relation(fields: [distributorId], references: [id])
+  /// Which specific ARN (parent or child) this mail's data belongs to —
+  /// distinct from distributorId, which only says which MFD tenant. Set
+  /// from the header-match hint at mail-ingestion time (overwritten by the
+  /// authoritative ARN-code-in-data match once schema-mapping resolves it).
+  /// Nullable for the same reason distributorId is, plus: existing rows
+  /// from before this field existed have no way to be backfilled (no raw
+  /// per-record data retained on this log row to re-derive it from).
+  arnProfileId  String?              @map("arn_profile_id") @db.Uuid
+  arnProfile    ArnProfile?          @relation(fields: [arnProfileId], references: [id])
   reportCode    String?              @map("report_code")
   rowsInserted  Int?                 @map("rows_inserted")
   errorMessage  String?              @map("error_message")
@@ -349,7 +714,45 @@ model MailIngestionLog {
 
   @@index([rtaType, createdAt])
   @@index([distributorId])
+  @@index([arnProfileId])
   @@map("mail_ingestion_logs")
+}
+
+/// Super-admin action trail — who did what to which distributor, and when.
+/// distributorId is nullable since some actions (sync-all, schedule
+/// pause/resume) aren't scoped to one tenant. No "who" beyond the shared
+/// admin key exists yet (see [[mfd_platform_scaffold]] — single-operator
+/// model), so actorLabel is a free-text hint, not a real user reference.
+model AdminAuditLog {
+  id            String       @id @default(uuid()) @db.Uuid
+  action        String
+  distributorId String?      @map("distributor_id") @db.Uuid
+  distributor   Distributor? @relation(fields: [distributorId], references: [id])
+  detail        Json?
+  createdAt     DateTime     @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@index([distributorId])
+  @@map("admin_audit_logs")
+}
+
+/// The super-admin's own login (2026-07-23) — a friendlier username/password
+/// front door in front of the pre-existing static `x-admin-key` mechanism,
+/// not a replacement for it: AdminAuthService.login checks this table, and
+/// on success hands back the SAME ADMIN_API_KEY value every admin/* route
+/// already checks via AdminGuard — no change to any existing admin
+/// endpoint's auth. The static key remains the recovery path (reset-password
+/// and reset-to-default both still require it), matching how the MFD
+/// onboarding default/reset password works. Single-operator model, same as
+/// AdminAuditLog above — this table exists to hold ONE seeded row
+/// (username "Admin"), not a multi-admin RBAC system.
+model SuperAdminUser {
+  id           String   @id @default(uuid()) @db.Uuid
+  username     String   @unique
+  passwordHash String   @map("password_hash")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@map("super_admin_users")
 }
 
 /// A purchase/redemption/switch/SIP-installment/dividend event on a folio.
@@ -380,6 +783,25 @@ model Transaction {
   brokerageAmount  Decimal?   @map("brokerage_amount") @db.Decimal(18, 2)
 
   idempotencyHash String      @unique @map("idempotency_hash")
+
+  /// "RTA_MAILBACK" (default) or "CAS_IMPORT" — see Folio.source doc
+  /// comment for why this distinction matters (a CAS-sourced row may
+  /// belong to a folio this MFD doesn't manage at all).
+  source          String      @default("RTA_MAILBACK")
+
+  /// The RTA's own N/R mode marker (see transaction-types.ts's
+  /// RTA_TRANSACTION_TYPES table) — true when this row is itself a
+  /// rejection/reversal record (e.g. "ADDR" = Purchase Rejection), computed
+  /// by resolveTransactionType() at ingestion but not persisted before
+  /// 2026-07-25. Lets the UI flag "this transaction failed/reverted"
+  /// instead of silently showing it identical to a normal one. Always
+  /// false for CAS-imported rows (no RTA rejection code exists there).
+  isRejection         Boolean @default(false) @map("is_rejection")
+  /// Raw RTA code this row's transactionType/isRejection were resolved
+  /// from (e.g. "ADDR") — kept for display/audit even when the code isn't
+  /// in RTA_TRANSACTION_TYPES (isRecognizedTransactionType false).
+  transactionTypeCode String? @map("transaction_type_code")
+
   createdAt       DateTime    @default(now()) @map("created_at")
 
   @@index([distributorId, folioId, transactionDate])

@@ -3,4 +3,8 @@ export * from "./mfsd201-transaction";
 export * from "./investor-master";
 export * from "./client-aum";
 export * from "./sip-registration";
+export * from "./kyc-status";
+export * from "./brokerage-withheld";
+export * from "./sip-expiry";
+export * from "./scheme-master";
 export * from "./report-identifier";

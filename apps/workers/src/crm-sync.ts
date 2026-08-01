@@ -1,4 +1,4 @@
-import { prisma } from "@mfd/db";
+import { Prisma, prisma } from "@mfd/db";
 
 async function upsertFolioRow(
   distributorId: string,
@@ -9,18 +9,23 @@ async function upsertFolioRow(
   arnProfileId?: string,
   schemeName?: string,
   assetClass?: string,
+  rtaType?: string,
 ): Promise<string> {
   // arnProfileId is set on both create AND update (not just create): every
   // caller in a given ingestion run resolves it from the same batch-wide
   // ARN code (see tenant-resolution.ts's single-ARN-per-batch invariant),
   // so re-asserting it on every upsert is safe and also self-heals any
-  // Folio row created before this field was threaded through at all.
+  // Folio row created before this field was threaded through at all. Same
+  // reasoning for rtaType (2026-07-25) — every caller in one ingestion run
+  // knows which RTA the batch came from, so re-asserting it self-heals
+  // pre-existing rows created before this field existed.
   // schemeName/assetClass only come from MFSD201/CLIENT_AUM records, not
   // investor-master — spread conditionally so an investor-master-only call
   // can't blank out a good value a transaction record already set.
   const extra = {
     ...(schemeName ? { schemeName } : {}),
     ...(assetClass ? { assetClass } : {}),
+    ...(rtaType ? { rtaType } : {}),
   };
   const folio = await prisma.folio.upsert({
     where: { distributorId_amcCode_folioNumber_schemeCode: { distributorId, amcCode, folioNumber, schemeCode } },
@@ -40,6 +45,7 @@ interface TransactionClientFolioParams {
   schemeCode: string;
   schemeName?: string;
   assetClass?: string;
+  rtaType?: string;
 }
 
 /**
@@ -61,7 +67,7 @@ interface TransactionClientFolioParams {
 export async function resolveClientAndFolioId(
   params: TransactionClientFolioParams,
 ): Promise<{ clientId: string; folioId: string }> {
-  const { distributorId, arnProfileId, panNumber, investorName, amcCode, folioNumber, schemeCode, schemeName, assetClass } =
+  const { distributorId, arnProfileId, panNumber, investorName, amcCode, folioNumber, schemeCode, schemeName, assetClass, rtaType } =
     params;
 
   if (panNumber) {
@@ -79,6 +85,7 @@ export async function resolveClientAndFolioId(
       arnProfileId,
       schemeName,
       assetClass,
+      rtaType,
     );
     return { clientId: client.id, folioId };
   }
@@ -91,6 +98,7 @@ export async function resolveClientAndFolioId(
       ...(arnProfileId && existingFolio.arnProfileId !== arnProfileId ? { arnProfileId } : {}),
       ...(schemeName ? { schemeName } : {}),
       ...(assetClass ? { assetClass } : {}),
+      ...(rtaType ? { rtaType } : {}),
     };
     if (Object.keys(extra).length > 0) {
       await prisma.folio.update({ where: { id: existingFolio.id }, data: extra });
@@ -99,7 +107,7 @@ export async function resolveClientAndFolioId(
   }
   const client = await prisma.client.create({ data: { distributorId, name: investorName ?? "Unknown" } });
   const folio = await prisma.folio.create({
-    data: { distributorId, clientId: client.id, amcCode, folioNumber, schemeCode, arnProfileId, schemeName, assetClass },
+    data: { distributorId, clientId: client.id, amcCode, folioNumber, schemeCode, arnProfileId, schemeName, assetClass, rtaType },
   });
   return { clientId: client.id, folioId: folio.id };
 }
@@ -122,6 +130,7 @@ interface InvestorMasterClientFolioParams {
   taxStatus?: string;
   bankAccountNumber?: string;
   bankName?: string;
+  rtaType?: string;
 }
 
 /**
@@ -157,6 +166,7 @@ export async function upsertInvestorMasterClientAndFolio(
     taxStatus,
     bankAccountNumber,
     bankName,
+    rtaType,
   } = params;
   const clientData = {
     name: investorName,
@@ -180,7 +190,7 @@ export async function upsertInvestorMasterClientAndFolio(
     });
     const folioId =
       amcCode && productCode
-        ? await upsertFolioRow(distributorId, client.id, amcCode, folioNumber, productCode, arnProfileId)
+        ? await upsertFolioRow(distributorId, client.id, amcCode, folioNumber, productCode, arnProfileId, undefined, undefined, rtaType)
         : null;
     return { clientId: client.id, folioId };
   }
@@ -198,14 +208,18 @@ export async function upsertInvestorMasterClientAndFolio(
     });
     if (existingFolio) {
       await prisma.client.update({ where: { id: existingFolio.clientId }, data: clientData });
-      if (arnProfileId && existingFolio.arnProfileId !== arnProfileId) {
-        await prisma.folio.update({ where: { id: existingFolio.id }, data: { arnProfileId } });
+      const folioExtra = {
+        ...(arnProfileId && existingFolio.arnProfileId !== arnProfileId ? { arnProfileId } : {}),
+        ...(rtaType ? { rtaType } : {}),
+      };
+      if (Object.keys(folioExtra).length > 0) {
+        await prisma.folio.update({ where: { id: existingFolio.id }, data: folioExtra });
       }
       return { clientId: existingFolio.clientId, folioId: existingFolio.id };
     }
     const client = await prisma.client.create({ data: { distributorId, ...clientData } });
     const folio = await prisma.folio.create({
-      data: { distributorId, clientId: client.id, amcCode, folioNumber, schemeCode: productCode, arnProfileId },
+      data: { distributorId, clientId: client.id, amcCode, folioNumber, schemeCode: productCode, arnProfileId, rtaType },
     });
     return { clientId: client.id, folioId: folio.id };
   }
@@ -269,4 +283,149 @@ export async function upsertSipRegistration(params: SipRegistrationParams): Prom
     create: { idempotencyHash, ...data },
     update: {},
   });
+}
+
+interface FolioKycStatusParams {
+  distributorId: string;
+  amcCode?: string;
+  folioNumber: string;
+  kycStatus?: string;
+  kycStatusDescription?: string;
+  aadhaarStatus?: string;
+  reportDate?: Date;
+}
+
+/**
+ * WBR56's KYC status is folio-number-level, not scheme-level — the report
+ * carries no scheme code at all, but a single real folio number can back
+ * several of our Folio rows (one per scheme held under it). Updates every
+ * Folio row sharing (distributorId, amcCode, folioNumber), not just one.
+ * Only enriches EXISTING Folio rows (never creates one) and only if the
+ * new report date is newer than what's stored, same "latest known
+ * snapshot" guard as updateFolioBalance — a re-run of an older WBR56 file
+ * can't regress a fresher status.
+ */
+export async function updateFolioKycStatus(params: FolioKycStatusParams): Promise<void> {
+  const { distributorId, amcCode, folioNumber, kycStatus, kycStatusDescription, aadhaarStatus, reportDate } = params;
+  if (!amcCode || !reportDate) {
+    return;
+  }
+  await prisma.$executeRaw`
+    UPDATE folios
+    SET kyc_status = ${kycStatus ?? null},
+        kyc_status_description = ${kycStatusDescription ?? null},
+        aadhaar_status = ${aadhaarStatus ?? null},
+        kyc_report_date = ${reportDate}
+    WHERE distributor_id = ${distributorId}::uuid
+      AND amc_code = ${amcCode}
+      AND folio_number = ${folioNumber}
+      AND (kyc_report_date IS NULL OR kyc_report_date <= ${reportDate})
+  `;
+}
+
+/**
+ * Best-effort Folio link for reports that don't carry a scheme code
+ * precise enough to use the normal (amcCode, folioNumber, schemeCode)
+ * composite key (WBR95/WBR5 both scope to folio number only) — takes the
+ * first matching row across whatever schemes exist under that folio
+ * number, purely as a convenience link for the UI to jump to a client.
+ * Returns null (never throws) when no match exists, since these reports
+ * can reference folios this system hasn't seen yet.
+ */
+export async function findFolioIdBestEffort(distributorId: string, folioNumber: string, amcCode?: string): Promise<string | null> {
+  const folio = await prisma.folio.findFirst({
+    where: { distributorId, folioNumber, ...(amcCode ? { amcCode } : {}) },
+    select: { id: true },
+  });
+  return folio?.id ?? null;
+}
+
+export interface SchemeMasterUpsertRow {
+  amcCode: string;
+  amcName?: string;
+  schemeCode: string;
+  schemeName: string;
+  schemeType?: string;
+  assetClass?: string;
+  sebiClassification?: string;
+  isin?: string;
+  planType?: string;
+  sipAllowed?: boolean;
+  swpAllowed?: boolean;
+  stpAllowed?: boolean;
+  closeEnded?: boolean;
+  elssScheme?: boolean;
+  minSipAmount?: number;
+  minPurchaseAmount?: number;
+  faceValue?: number;
+  parentSchemeCode?: string;
+}
+
+/**
+ * Bulk upsert into the GLOBAL SchemeMaster table (no distributorId — see
+ * its schema doc comment) via raw SQL, same batched-INSERT-ON-CONFLICT
+ * pattern already proven for EquityIsinMaster (Prisma has no native
+ * bulk-upsert and thousands of sequential upserts would be too slow for a
+ * 7,000+ row report). Follows with a single enrichment UPDATE that
+ * backfills any CAMS-sourced Folio row still missing an assetClass —
+ * best-effort, since Folio.schemeCode is a per-distributor product code
+ * that isn't guaranteed to line up with this report's own SCH_CODE in
+ * every case.
+ */
+export async function upsertSchemeMasterRows(rowsIn: SchemeMasterUpsertRow[]): Promise<number> {
+  const BATCH_SIZE = 500;
+  let total = 0;
+  for (let i = 0; i < rowsIn.length; i += BATCH_SIZE) {
+    const batch = rowsIn.slice(i, i + BATCH_SIZE);
+    const values = batch.map(
+      (r) => Prisma.sql`(
+        gen_random_uuid(), ${r.amcCode}, ${r.amcName ?? null}, ${r.schemeCode}, ${r.schemeName},
+        ${r.schemeType ?? null}, ${r.assetClass ?? null}, ${r.sebiClassification ?? null}, ${r.isin ?? null},
+        ${r.planType ?? null}, ${r.sipAllowed ?? null}, ${r.swpAllowed ?? null}, ${r.stpAllowed ?? null},
+        ${r.closeEnded ?? null}, ${r.elssScheme ?? null}, ${r.minSipAmount ?? null}, ${r.minPurchaseAmount ?? null},
+        ${r.faceValue ?? null}, ${r.parentSchemeCode ?? null}, now()
+      )`,
+    );
+    const result: unknown[] = await prisma.$queryRaw`
+      INSERT INTO scheme_master (
+        id, amc_code, amc_name, scheme_code, scheme_name, scheme_type, asset_class, sebi_classification, isin,
+        plan_type, sip_allowed, swp_allowed, stp_allowed, close_ended, elss_scheme, min_sip_amount,
+        min_purchase_amount, face_value, parent_scheme_code, updated_at
+      )
+      VALUES ${Prisma.join(values)}
+      ON CONFLICT (amc_code, scheme_code) DO UPDATE SET
+        amc_name = EXCLUDED.amc_name,
+        scheme_name = EXCLUDED.scheme_name,
+        scheme_type = EXCLUDED.scheme_type,
+        asset_class = EXCLUDED.asset_class,
+        sebi_classification = EXCLUDED.sebi_classification,
+        isin = EXCLUDED.isin,
+        plan_type = EXCLUDED.plan_type,
+        sip_allowed = EXCLUDED.sip_allowed,
+        swp_allowed = EXCLUDED.swp_allowed,
+        stp_allowed = EXCLUDED.stp_allowed,
+        close_ended = EXCLUDED.close_ended,
+        elss_scheme = EXCLUDED.elss_scheme,
+        min_sip_amount = EXCLUDED.min_sip_amount,
+        min_purchase_amount = EXCLUDED.min_purchase_amount,
+        face_value = EXCLUDED.face_value,
+        parent_scheme_code = EXCLUDED.parent_scheme_code,
+        updated_at = now()
+      RETURNING id
+    `;
+    total += result.length;
+  }
+
+  await prisma.$executeRaw`
+    UPDATE folios f
+    SET asset_class = sm.asset_class
+    FROM scheme_master sm
+    WHERE f.amc_code = sm.amc_code
+      AND f.scheme_code = sm.scheme_code
+      AND f.rta_type = 'CAMS'
+      AND f.asset_class IS NULL
+      AND sm.asset_class IS NOT NULL
+  `;
+
+  return total;
 }

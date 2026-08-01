@@ -20,6 +20,13 @@ function requireEncryptionKey(): string {
  * narrowed to one distributor. Used when the caller doesn't yet know which
  * tenant a piece of RTA data belongs to (e.g. archive decryption trying
  * each onboarded MFD's zip password in turn).
+ *
+ * Ordered newest-first: ExternalCredential keeps full password history (see
+ * its model doc comment — RTAs rotate zip passwords per report-scheduling
+ * request), so a given (arnProfileId, provider) can have several rows. The
+ * current/live password is virtually always the right one to try first;
+ * older archives that need an older password just cost a few more failed
+ * attempts before the right one is found further down the list.
  */
 export async function listDecryptedCredentials(
   provider: ExternalProvider,
@@ -32,6 +39,7 @@ export async function listDecryptedCredentials(
       ...(distributorId ? { arnProfile: { distributorId } } : {}),
     },
     include: { arnProfile: { select: { distributorId: true } } },
+    orderBy: { createdAt: "desc" },
   });
 
   return credentials.map((cred) => ({

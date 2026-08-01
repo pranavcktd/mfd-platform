@@ -13,6 +13,12 @@ import { MisModule } from "./mis/mis.module";
 import { ReportsModule } from "./reports/reports.module";
 import { OtherAssetsModule } from "./other-assets/other-assets.module";
 import { AnalysisModule } from "./analysis/analysis.module";
+import { ClientAuthModule } from "./client-auth/client-auth.module";
+import { ClientAuthMiddleware } from "./client-tenant/client-auth.middleware";
+import { ClientPortalModule } from "./client-portal/client-portal.module";
+import { AdminAuthModule } from "./admin-auth/admin-auth.module";
+import { ImportExternalModule } from "./import-external/import-external.module";
+import { EquityIsinMasterModule } from "./equity-isin-master/equity-isin-master.module";
 
 @Module({
   imports: [
@@ -28,9 +34,14 @@ import { AnalysisModule } from "./analysis/analysis.module";
     ReportsModule,
     OtherAssetsModule,
     AnalysisModule,
+    ClientAuthModule,
+    ClientPortalModule,
+    AdminAuthModule,
+    ImportExternalModule,
+    EquityIsinMasterModule,
   ],
   controllers: [HealthController],
-  providers: [TenantMiddleware],
+  providers: [TenantMiddleware, ClientAuthMiddleware],
 })
 export class AppModule {
   configure(consumer: MiddlewareConsumer) {
@@ -40,7 +51,25 @@ export class AppModule {
         { path: "health", method: RequestMethod.GET },
         { path: "auth/login", method: RequestMethod.POST },
         { path: "admin/(.*)", method: RequestMethod.ALL },
+        { path: "admin-auth/(.*)", method: RequestMethod.ALL },
+        { path: "client-auth/login", method: RequestMethod.POST },
+        { path: "client-auth/change-password", method: RequestMethod.PATCH },
+        { path: "client/(.*)", method: RequestMethod.ALL },
       )
       .forRoutes("*");
+
+    // Client-portal routes get their own middleware instead of
+    // TenantMiddleware — a separate auth surface from the MFD's own login
+    // (see ClientAuthMiddleware doc comment). Note: "client/*" (documented
+    // NestJS wildcard), not "client/(.*)" — confirmed the hard way that a
+    // raw regex string is accepted (silently, no error) by exclude() but
+    // does NOT match anything when passed to forRoutes() on this NestJS
+    // version, which left this middleware never actually running.
+    consumer
+      .apply(ClientAuthMiddleware)
+      .forRoutes(
+        { path: "client-auth/change-password", method: RequestMethod.PATCH },
+        { path: "client/*", method: RequestMethod.ALL },
+      );
   }
 }

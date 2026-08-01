@@ -105,3 +105,53 @@ body {
   color: var(--text-primary);
   font-family: var(--font-sans);
 }
+
+/*
+ * Print isolation for PrintableModal (components/ui/PrintableModal.tsx).
+ * The modal is portalled to document.body as a sibling of the app shell,
+ * so printing just needs to hide the shell entirely and let the portal's
+ * own content flow normally (not fixed/absolute) across as many printed
+ * pages as it needs — classic "hide everything except .printable-root"
+ * trick, but scoped by a body class rather than visibility:hidden on every
+ * element, since a fixed-position ancestor would otherwise clip a
+ * multi-page report to one viewport-height page.
+ */
+@media print {
+  body.print-modal-open [data-app-shell] {
+    display: none !important;
+  }
+  body.print-modal-open .print-modal-portal {
+    position: static !important;
+    background: none !important;
+    padding: 0 !important;
+    display: block !important;
+  }
+  body.print-modal-open .print-modal-panel {
+    position: static !important;
+    max-height: none !important;
+    overflow: visible !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    width: 100% !important;
+    max-width: none !important;
+    color: #0b0b0b !important;
+    background: #ffffff !important;
+    /* Force the light palette for print regardless of the viewer's current
+       theme — a dark-mode PDF wastes ink and looks wrong shared onward. */
+    --surface-1: #fcfcfb;
+    --page-plane: #f9f9f7;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted: #898781;
+    --gridline: #e1e0d9;
+    --baseline: #c3c2b7;
+    --border: rgba(11, 11, 11, 0.1);
+    --success-text: #006300;
+    --series-1: #2a78d6;
+    --series-2: #008300;
+    --series-3: #e87ba4;
+    --series-4: #eda100;
+    --series-5: #1baf7a;
+    --series-6: #eb6834;
+  }
+}

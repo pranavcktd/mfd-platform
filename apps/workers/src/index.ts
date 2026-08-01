@@ -9,11 +9,13 @@ config({ path: resolve(__dirname, "../../../.env") });
 import { Worker } from "bullmq";
 import { createRedisConnection } from "./redis-connection";
 import { QueueNames } from "@mfd/shared";
-import { mailIngestionQueue } from "./queues/queue-producers";
+import { mailIngestionQueue, syncHealthCheckQueue } from "./queues/queue-producers";
 import { processMailIngestion } from "./processors/mail-ingestion.processor";
 import { processArchiveDecryption } from "./processors/archive-decryption.processor";
 import { processSchemaMapping } from "./processors/schema-mapping.processor";
 import { processAnalyticsCalc } from "./processors/analytics-calc.processor";
+import { processFolderImport } from "./processors/folder-import.processor";
+import { processSyncHealthCheck } from "./processors/sync-health-check.processor";
 
 const connection = createRedisConnection();
 
@@ -22,6 +24,11 @@ const workers = [
   new Worker(QueueNames.ARCHIVE_DECRYPTION, processArchiveDecryption, { connection }),
   new Worker(QueueNames.SCHEMA_MAPPING, processSchemaMapping, { connection }),
   new Worker(QueueNames.ANALYTICS_CALC, processAnalyticsCalc, { connection }),
+  // Long-running (walks a whole folder, shells out to 7z per zip) — its own
+  // worker so a big one-time import can't starve the twice/thrice-daily
+  // mail-ingestion poll's concurrency slot.
+  new Worker(QueueNames.FOLDER_IMPORT, processFolderImport, { connection, concurrency: 1 }),
+  new Worker(QueueNames.SYNC_HEALTH_CHECK, processSyncHealthCheck, { connection }),
 ];
 
 for (const worker of workers) {
@@ -35,15 +42,27 @@ for (const worker of workers) {
   });
 }
 
-// Twice-daily mail poll (morning + evening, default 8am/6pm) — configurable
-// via env since "morning and evening" is a business preference, not a
-// technical constant. addJobScheduler is idempotent by schedulerId, so
+// Thrice-daily mail poll (morning/afternoon/night, default 8am/2pm/8pm) —
+// configurable via env since the exact times are a business preference, not
+// a technical constant. upsertJobScheduler is idempotent by schedulerId, so
 // restarting the worker process doesn't create duplicate schedules.
-const MAIL_POLL_CRON = process.env.MAIL_POLL_CRON ?? "0 8,18 * * *";
+const MAIL_POLL_CRON = process.env.MAIL_POLL_CRON ?? "0 8,14,20 * * *";
 mailIngestionQueue().upsertJobScheduler("mail-poll-schedule", { pattern: MAIL_POLL_CRON }, { name: "mail-poll" }).catch((err) => {
   // eslint-disable-next-line no-console
   console.error("[workers] failed to register mail poll schedule:", err);
 });
+
+// Daily sync-health check — see sync-health-check.processor.ts. Runs once
+// a day (default 9am) rather than after every poll, since a single
+// DECRYPT_FAILED is expected noise; the check itself requires 2+
+// consecutive failures before flagging anything.
+const SYNC_HEALTH_CRON = process.env.SYNC_HEALTH_CRON ?? "0 9 * * *";
+syncHealthCheckQueue()
+  .upsertJobScheduler("sync-health-check-schedule", { pattern: SYNC_HEALTH_CRON }, { name: "sync-health-check" })
+  .catch((err) => {
+    // eslint-disable-next-line no-console
+    console.error("[workers] failed to register sync health check schedule:", err);
+  });
 
 // eslint-disable-next-line no-console
 console.log(`[workers] started: ${workers.map((w) => w.name).join(", ")}, mail poll cron: ${MAIL_POLL_CRON}`);

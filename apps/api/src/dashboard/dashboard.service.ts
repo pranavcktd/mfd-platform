@@ -1,6 +1,9 @@
 import { Injectable } from "@nestjs/common";
-import { prisma } from "@mfd/db";
+import { Prisma, prisma } from "@mfd/db";
+import { resolveAmcName } from "@mfd/shared";
 import { TenantContext } from "../tenant/tenant-context";
+
+const RECENT_CLIENTS_PAGE_SIZE = 10;
 
 @Injectable()
 export class DashboardService {
@@ -53,7 +56,6 @@ export class DashboardService {
       activeSipCount,
       topAmcRows,
       topClientRows,
-      recentClients,
     ] = await Promise.all([
       prisma.folio.aggregate({ where: folioWhere, _sum: { valuationAmount: true } }),
       prisma.client.count({ where: clientWhere }),
@@ -79,12 +81,6 @@ export class DashboardService {
         orderBy: { _sum: { valuationAmount: "desc" } },
         take: 5,
       }),
-      prisma.client.findMany({
-        where: clientWhere,
-        orderBy: { createdAt: "desc" },
-        take: 5,
-        select: { id: true, name: true, createdAt: true },
-      }),
     ]);
 
     const topClientIds = topClientRows.map((r) => r.clientId);
@@ -94,32 +90,16 @@ export class DashboardService {
     });
     const nameById = new Map(topClientNames.map((c) => [c.id, c.name]));
 
-    // Real scheme names captured from the RTA (not a fabricated AMC-name
-    // mapping — no reference file for that exists) as a naming hint next to
-    // the bare amcCode, same approach as reports.service.ts's AUM report.
+    // resolveAmcName derives the real AMC display name (e.g. "Axis Mutual
+    // Fund") from a sample scheme name for each amcCode — amcCode itself is
+    // just a short RTA-internal code, not a display-ready name (see
+    // amc-names.ts doc comment).
     const sampleNames = await prisma.folio.findMany({
       where: { ...folioWhere, amcCode: { in: topAmcRows.map((r) => r.amcCode) }, schemeName: { not: null } },
       distinct: ["amcCode"],
       select: { amcCode: true, schemeName: true },
     });
     const schemeNameByAmc = new Map(sampleNames.map((s) => [s.amcCode, s.schemeName]));
-
-    const recentClientDetails = await Promise.all(
-      recentClients.map(async (client) => {
-        const latestTx = await prisma.transaction.findFirst({
-          where: {
-            folio: { clientId: client.id, ...(arnScope ? { arnProfileId: { in: arnScope } } : {}) },
-          },
-          orderBy: { transactionDate: "desc" },
-          select: { transactionType: true, transactionDescription: true, transactionDate: true },
-        });
-        return {
-          name: client.name,
-          transactionType: latestTx?.transactionDescription ?? latestTx?.transactionType ?? null,
-          date: (latestTx?.transactionDate ?? client.createdAt).toISOString(),
-        };
-      }),
-    );
 
     return {
       totalAum: aumAgg._sum.valuationAmount?.toString() ?? "0",
@@ -129,14 +109,13 @@ export class DashboardService {
       activeSips: activeSipCount,
       topAmcs: topAmcRows.map((r) => ({
         amcCode: r.amcCode,
-        sampleSchemeName: schemeNameByAmc.get(r.amcCode) ?? null,
+        amcName: resolveAmcName(schemeNameByAmc.get(r.amcCode), r.amcCode),
         aum: r._sum.valuationAmount?.toString() ?? "0",
       })),
       topClients: topClientRows.map((r) => ({
         name: nameById.get(r.clientId) ?? "Unknown",
         aum: r._sum.valuationAmount?.toString() ?? "0",
       })),
-      recentClients: recentClientDetails,
     };
   }
 
@@ -149,7 +128,68 @@ export class DashboardService {
       activeSips: 0,
       topAmcs: [],
       topClients: [],
-      recentClients: [],
+    };
+  }
+
+  /**
+   * Paginated "recently added clients" — deliberately split out of
+   * getSummary (which used to embed a fixed top-5 slice augmented with an
+   * unrelated "latest transaction" field, muddling "when this client
+   * record was added" with "what they last did" — a real user-reported
+   * confusion). Shows the real onboarding date and which ARN(s) the
+   * client's folios are attributed to, paginated so the full addition
+   * history is actually reachable, not just the last handful.
+   */
+  async getRecentClients(requestedArnProfileIds: string[] | undefined, page: number) {
+    const distributorId = TenantContext.currentDistributorId();
+
+    let arnScope: string[] | undefined;
+    if (requestedArnProfileIds && requestedArnProfileIds.length > 0) {
+      const owned = await prisma.arnProfile.findMany({
+        where: { distributorId, id: { in: requestedArnProfileIds } },
+        select: { id: true },
+      });
+      arnScope = owned.map((a) => a.id);
+      if (arnScope.length === 0) {
+        return { total: 0, page, pageSize: RECENT_CLIENTS_PAGE_SIZE, clients: [] };
+      }
+    }
+
+    const arnJoinFilter = arnScope ? Prisma.sql`AND f.arn_profile_id = ANY(${arnScope}::uuid[])` : Prisma.empty;
+    const joinType = arnScope ? Prisma.sql`JOIN` : Prisma.sql`LEFT JOIN`;
+
+    const clients = await prisma.$queryRaw<
+      Array<{ id: string; name: string; panNumber: string | null; createdAt: Date; arnNumbers: string[] | null }>
+    >`
+      SELECT c.id, c.name, c.pan_number AS "panNumber", c.created_at AS "createdAt",
+             array_agg(DISTINCT a.arn_number) FILTER (WHERE a.arn_number IS NOT NULL) AS "arnNumbers"
+      FROM clients c
+      ${joinType} folios f ON f.client_id = c.id ${arnJoinFilter}
+      LEFT JOIN arn_profiles a ON a.id = f.arn_profile_id
+      WHERE c.distributor_id = ${distributorId}::uuid AND c.merged_into_client_id IS NULL
+      GROUP BY c.id
+      ORDER BY c.created_at DESC
+      LIMIT ${RECENT_CLIENTS_PAGE_SIZE} OFFSET ${(page - 1) * RECENT_CLIENTS_PAGE_SIZE}
+    `;
+
+    const [{ count: total }] = await prisma.$queryRaw<Array<{ count: number }>>`
+      SELECT COUNT(DISTINCT c.id)::int AS count
+      FROM clients c
+      ${joinType} folios f ON f.client_id = c.id ${arnJoinFilter}
+      WHERE c.distributor_id = ${distributorId}::uuid AND c.merged_into_client_id IS NULL
+    `;
+
+    return {
+      total,
+      page,
+      pageSize: RECENT_CLIENTS_PAGE_SIZE,
+      clients: clients.map((c) => ({
+        id: c.id,
+        name: c.name,
+        panNumber: c.panNumber,
+        createdAt: c.createdAt,
+        arnNumbers: c.arnNumbers ?? [],
+      })),
     };
   }
 }

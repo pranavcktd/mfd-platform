@@ -1,35 +1,60 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
-import { Search } from "lucide-react";
+import { Link, useSearchParams } from "react-router-dom";
+import { X, Users } from "lucide-react";
 import { useClientList } from "../hooks/useCrm";
-import { formatCount, formatDate, formatInrCompact } from "../lib/format";
+import { useArnProfiles } from "../hooks/useDashboard";
+import { Amount } from "../components/ui/Amount";
+import { PageHeader } from "../components/ui/PageHeader";
+import { ArnFilter } from "../components/ui/ArnFilter";
+import { SearchBox } from "../components/ui/SearchBox";
+import { Pager } from "../components/ui/Pager";
+import { formatCount, formatDate } from "../lib/format";
 
 export function CrmPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const amcCode = searchParams.get("amcCode") ?? undefined;
+  const assetClass = searchParams.get("assetClass") ?? undefined;
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
-  const { data, isLoading } = useClientList(search, page);
-
-  const totalPages = data ? Math.max(1, Math.ceil(data.total / data.pageSize)) : 1;
+  const [arnIds, setArnIds] = useState<string[]>([]);
+  const { data: arnProfiles } = useArnProfiles();
+  const { data, isLoading } = useClientList(search, page, { amcCode, assetClass, arnProfileIds: arnIds });
 
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-lg font-semibold text-ink">CRM — Client Master</h1>
+        <PageHeader icon={Users} accent="series-2" title="CRM — Client Master">
           <p className="text-sm text-ink-secondary">
             {data ? `${formatCount(data.total)} clients` : "Loading…"}
           </p>
-        </div>
-        <div className="relative">
-          <Search size={15} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-muted" />
-          <input
+          {(amcCode || assetClass) && (
+            <div className="mt-1 flex items-center gap-1.5">
+              <span className="rounded-full bg-series-1/10 px-2 py-0.5 text-xs text-series-1">
+                Filtered by {amcCode ? `AMC ${amcCode}` : assetClass}
+              </span>
+              <button
+                onClick={() => setSearchParams({})}
+                className="text-ink-muted hover:text-ink"
+                aria-label="Clear filter"
+              >
+                <X size={13} />
+              </button>
+            </div>
+          )}
+        </PageHeader>
+        <div className="flex items-center gap-2">
+          {arnProfiles && (
+            <ArnFilter
+              arnProfiles={arnProfiles}
+              selectedIds={arnIds}
+              onChange={(ids) => { setArnIds(ids); setPage(1); }}
+            />
+          )}
+          <SearchBox
             value={search}
-            onChange={(e) => {
-              setSearch(e.target.value);
-              setPage(1);
-            }}
-            placeholder="Search name, PAN, email…"
-            className="w-72 rounded-md border border-[var(--border)] bg-surface py-1.5 pl-8 pr-3 text-sm text-ink outline-none focus:border-series-1"
+            onChange={(v) => { setSearch(v); setPage(1); }}
+            placeholder="Search name, PAN, email, mobile…"
+            className="w-72"
           />
         </div>
       </div>
@@ -40,7 +65,8 @@ export function CrmPage() {
             <tr className="border-b border-[var(--border)] text-left text-xs text-ink-secondary">
               <th className="px-4 py-2 font-medium">Name</th>
               <th className="px-4 py-2 font-medium">PAN</th>
-              <th className="px-4 py-2 font-medium">Contact</th>
+              <th className="px-4 py-2 font-medium">Email</th>
+              <th className="px-4 py-2 font-medium">Mobile</th>
               <th className="px-4 py-2 font-medium">Folios</th>
               <th className="px-4 py-2 text-right font-medium">Total AUM</th>
               <th className="px-4 py-2 font-medium">Onboarded</th>
@@ -49,7 +75,7 @@ export function CrmPage() {
           <tbody className="divide-y divide-[var(--gridline)]">
             {!isLoading && data?.clients.length === 0 && (
               <tr>
-                <td colSpan={6} className="px-4 py-6 text-center text-ink-muted">
+                <td colSpan={7} className="px-4 py-6 text-center text-ink-muted">
                   No clients found.
                 </td>
               </tr>
@@ -60,11 +86,17 @@ export function CrmPage() {
                   <Link to={`/crm/${c.id}`} className="text-series-1 hover:underline">
                     {c.name}
                   </Link>
+                  {c.needsReview && (
+                    <span className="ml-2 rounded bg-status-warning/20 px-1.5 py-0.5 text-[10px] text-status-warning">
+                      needs review
+                    </span>
+                  )}
                 </td>
                 <td className="px-4 py-2 text-ink-secondary">{c.panNumber ?? "—"}</td>
-                <td className="px-4 py-2 text-ink-secondary">{c.email ?? c.phone ?? "—"}</td>
+                <td className="px-4 py-2 text-ink-secondary">{c.email ?? "—"}</td>
+                <td className="px-4 py-2 text-ink-secondary">{c.phone ?? "—"}</td>
                 <td className="px-4 py-2 text-ink-secondary">{c.folioCount}</td>
-                <td className="px-4 py-2 text-right tabular-nums text-ink">{formatInrCompact(c.totalAum)}</td>
+                <td className="px-4 py-2 text-right tabular-nums text-ink"><Amount value={c.totalAum} /></td>
                 <td className="px-4 py-2 text-ink-muted">{formatDate(c.createdAt)}</td>
               </tr>
             ))}
@@ -72,29 +104,7 @@ export function CrmPage() {
         </table>
       </div>
 
-      {data && data.total > data.pageSize && (
-        <div className="flex items-center justify-between text-sm text-ink-secondary">
-          <span>
-            Page {page} of {totalPages}
-          </span>
-          <div className="flex gap-2">
-            <button
-              disabled={page <= 1}
-              onClick={() => setPage((p) => p - 1)}
-              className="rounded-md border border-[var(--border)] px-3 py-1 disabled:opacity-40"
-            >
-              Previous
-            </button>
-            <button
-              disabled={page >= totalPages}
-              onClick={() => setPage((p) => p + 1)}
-              className="rounded-md border border-[var(--border)] px-3 py-1 disabled:opacity-40"
-            >
-              Next
-            </button>
-          </div>
-        </div>
-      )}
+      {data && <Pager page={page} setPage={setPage} total={data.total} pageSize={data.pageSize} />}
     </div>
   );
 }

@@ -1,13 +1,17 @@
 import { Controller, Get, Query } from "@nestjs/common";
 import { ReportsService } from "./reports.service";
 
+function parseArnIds(raw?: string): string[] | undefined {
+  return raw ? raw.split(",").filter(Boolean) : undefined;
+}
+
 @Controller("reports")
 export class ReportsController {
   constructor(private readonly reportsService: ReportsService) {}
 
   @Get("aum")
-  getAum() {
-    return this.reportsService.getAumReport();
+  getAum(@Query("arnProfileIds") arnProfileIds?: string) {
+    return this.reportsService.getAumReport(parseArnIds(arnProfileIds));
   }
 
   @Get("transactions")
@@ -16,37 +20,157 @@ export class ReportsController {
     @Query("from") from?: string,
     @Query("to") to?: string,
     @Query("page") page?: string,
+    @Query("arnProfileIds") arnProfileIds?: string,
   ) {
-    return this.reportsService.getTransactionsReport({ type, from, to, page: page ? Number(page) : 1 });
+    return this.reportsService.getTransactionsReport({
+      type,
+      from,
+      to,
+      page: page ? Number(page) : 1,
+      arnProfileIds: parseArnIds(arnProfileIds),
+    });
   }
 
   @Get("sip")
-  getSip(@Query("status") status?: "new" | "active" | "ceased", @Query("page") page?: string) {
-    return this.reportsService.getSipReport(status, page ? Number(page) : 1);
+  getSip(
+    @Query("status") status?: "new" | "active" | "ceased",
+    @Query("page") page?: string,
+    @Query("arnProfileIds") arnProfileIds?: string,
+  ) {
+    return this.reportsService.getSipReport(status, page ? Number(page) : 1, parseArnIds(arnProfileIds));
   }
 
   @Get("holdings")
-  getHoldings(@Query("clientId") clientId?: string, @Query("page") page?: string) {
-    return this.reportsService.getHoldingsReport(clientId, page ? Number(page) : 1);
+  getHoldings(
+    @Query("clientId") clientId?: string,
+    @Query("page") page?: string,
+    @Query("arnProfileIds") arnProfileIds?: string,
+    @Query("search") search?: string,
+  ) {
+    return this.reportsService.getHoldingsReport(clientId, page ? Number(page) : 1, parseArnIds(arnProfileIds), search);
   }
 
   @Get("net-worth")
-  getNetWorth(@Query("page") page?: string) {
-    return this.reportsService.getNetWorthReport(page ? Number(page) : 1);
+  getNetWorth(
+    @Query("page") page?: string,
+    @Query("arnProfileIds") arnProfileIds?: string,
+    @Query("search") search?: string,
+  ) {
+    return this.reportsService.getNetWorthReport(page ? Number(page) : 1, parseArnIds(arnProfileIds), search);
   }
 
   @Get("valuation")
-  getValuation(@Query("page") page?: string) {
-    return this.reportsService.getValuationReport(page ? Number(page) : 1);
+  getValuation(
+    @Query("page") page?: string,
+    @Query("arnProfileIds") arnProfileIds?: string,
+    @Query("search") search?: string,
+  ) {
+    return this.reportsService.getValuationReport(page ? Number(page) : 1, parseArnIds(arnProfileIds), search);
   }
 
   @Get("brokerage/summary")
-  getBrokerageSummary() {
-    return this.reportsService.getBrokerageSummary();
+  getBrokerageSummary(
+    @Query("from") from?: string,
+    @Query("to") to?: string,
+    @Query("amcCode") amcCode?: string,
+    @Query("clientId") clientId?: string,
+    @Query("arnProfileIds") arnProfileIds?: string,
+  ) {
+    return this.reportsService.getBrokerageSummary({ from, to, amcCode, clientId, arnProfileIds: parseArnIds(arnProfileIds) });
   }
 
   @Get("brokerage/transactions")
-  getBrokerageTransactions(@Query("page") page?: string) {
-    return this.reportsService.getBrokerageTransactions(page ? Number(page) : 1);
+  getBrokerageTransactions(
+    @Query("page") page?: string,
+    @Query("from") from?: string,
+    @Query("to") to?: string,
+    @Query("amcCode") amcCode?: string,
+    @Query("clientId") clientId?: string,
+    @Query("arnProfileIds") arnProfileIds?: string,
+  ) {
+    return this.reportsService.getBrokerageTransactions(page ? Number(page) : 1, {
+      from,
+      to,
+      amcCode,
+      clientId,
+      arnProfileIds: parseArnIds(arnProfileIds),
+    });
+  }
+
+  // --- Client reports ---
+
+  @Get("client/family-allocation")
+  getFamilyAllocation(@Query("arnProfileIds") arnProfileIds?: string) {
+    return this.reportsService.getFamilyAllocationReport(parseArnIds(arnProfileIds));
+  }
+
+  @Get("client/cas")
+  getCasReport(@Query("page") page?: string, @Query("arnProfileIds") arnProfileIds?: string) {
+    return this.reportsService.getCasReport(page ? Number(page) : 1, parseArnIds(arnProfileIds));
+  }
+
+  @Get("client/capital-gains")
+  getCapitalGains(@Query("type") type?: "realized" | "notional", @Query("arnProfileIds") arnProfileIds?: string) {
+    return this.reportsService.getCapitalGainsReport(type === "realized", parseArnIds(arnProfileIds));
+  }
+
+  // --- Distributor reports ---
+
+  @Get("distributor/business-development")
+  getBusinessDevelopment(@Query("arnProfileIds") arnProfileIds?: string) {
+    return this.reportsService.getBusinessDevelopmentReport(parseArnIds(arnProfileIds));
+  }
+
+  @Get("distributor/dividend")
+  getDividend(@Query("page") page?: string, @Query("arnProfileIds") arnProfileIds?: string) {
+    return this.reportsService.getDividendReport(page ? Number(page) : 1, parseArnIds(arnProfileIds));
+  }
+
+  @Get("distributor/sip-due")
+  getSipDue(@Query("withinDays") withinDays?: string, @Query("arnProfileIds") arnProfileIds?: string) {
+    return this.reportsService.getSipDueReport(withinDays ? Number(withinDays) : 7, parseArnIds(arnProfileIds));
+  }
+
+  @Get("distributor/sip-expiring")
+  getSipExpiring(@Query("withinDays") withinDays?: string, @Query("arnProfileIds") arnProfileIds?: string) {
+    return this.reportsService.getSipExpiringReport(withinDays ? Number(withinDays) : 30, parseArnIds(arnProfileIds));
+  }
+
+  @Get("distributor/brokerage-withheld")
+  getBrokerageWithheld(
+    @Query("page") page?: string,
+    @Query("arnProfileIds") arnProfileIds?: string,
+    @Query("search") search?: string,
+  ) {
+    return this.reportsService.getBrokerageWithheldReport(page ? Number(page) : 1, parseArnIds(arnProfileIds), search);
+  }
+
+  @Get("distributor/sip-stp-expiring-cams")
+  getSipStpExpiringCams(
+    @Query("page") page?: string,
+    @Query("arnProfileIds") arnProfileIds?: string,
+    @Query("search") search?: string,
+  ) {
+    return this.reportsService.getSipStpExpiringCamsReport(page ? Number(page) : 1, parseArnIds(arnProfileIds), search);
+  }
+
+  @Get("distributor/stp")
+  getStp(@Query("page") page?: string, @Query("arnProfileIds") arnProfileIds?: string) {
+    return this.reportsService.getStpReport(page ? Number(page) : 1, parseArnIds(arnProfileIds));
+  }
+
+  @Get("distributor/swp")
+  getSwp(@Query("page") page?: string, @Query("arnProfileIds") arnProfileIds?: string) {
+    return this.reportsService.getSwpReport(page ? Number(page) : 1, parseArnIds(arnProfileIds));
+  }
+
+  @Get("distributor/transaction-summary")
+  getTransactionSummary(@Query("arnProfileIds") arnProfileIds?: string) {
+    return this.reportsService.getTransactionSummaryReport(parseArnIds(arnProfileIds));
+  }
+
+  @Get("distributor/client-returns")
+  getClientReturns(@Query("arnProfileIds") arnProfileIds?: string) {
+    return this.reportsService.getClientReturnsReport(parseArnIds(arnProfileIds));
   }
 }

@@ -4,6 +4,8 @@ import { Link } from "react-router-dom";
 interface StatTileProps {
   label: string;
   value: string;
+  /** Exact figure shown beneath the compact one (e.g. "₹28,94,231.50") — for money tiles, so the rounded Cr/L headline can still be cross-checked against source data. */
+  subValue?: string;
   icon: LucideIcon;
   href?: string;
   accent?: "series-1" | "series-2" | "series-4" | "series-5";
@@ -18,7 +20,7 @@ const ACCENT_CLASSES: Record<NonNullable<StatTileProps["accent"]>, { bg: string;
   "series-5": { bg: "bg-series-5/10", text: "text-series-5" },
 };
 
-export function StatTile({ label, value, icon: Icon, href, accent = "series-1" }: StatTileProps) {
+export function StatTile({ label, value, subValue, icon: Icon, href, accent = "series-1" }: StatTileProps) {
   const accentClasses = ACCENT_CLASSES[accent];
 
   const content = (
@@ -26,6 +28,7 @@ export function StatTile({ label, value, icon: Icon, href, accent = "series-1" }
       <div>
         <p className="text-xs font-medium text-ink-secondary">{label}</p>
         <p className="mt-1.5 text-2xl font-semibold tabular-nums text-ink">{value}</p>
+        {subValue && <p className="mt-0.5 text-xs tabular-nums text-ink-muted">{subValue}</p>}
       </div>
       <div className={`rounded-md p-2 ${accentClasses.bg}`}>
         <Icon size={18} className={accentClasses.text} strokeWidth={2} />

@@ -21,7 +21,7 @@ interface ExtractedFile {
   contents: Buffer;
 }
 
-function detectSourceFormat(fileName: string): "DBF" | "CSV" | "TXT" {
+export function detectSourceFormat(fileName: string): "DBF" | "CSV" | "TXT" {
   const ext = fileName.toLowerCase().split(".").pop();
   if (ext === "dbf") return "DBF";
   if (ext === "csv") return "CSV";
@@ -90,12 +90,32 @@ export interface DecryptedArchive {
  * later without a code change. Tries stored credentials in turn (narrowed
  * to expectedDistributorId if given) until one successfully decrypts;
  * whichever works identifies a candidate tenant.
+ *
+ * passwordOverride skips the stored-credential lookup entirely and tries
+ * only that one password — for one-time folder imports of an older
+ * since-inception archive. Confirmed the hard way (2026-07-23) that CAMS
+ * genuinely reissues a new zip password per report-scheduling request: a
+ * real historical archive needed a different password than what's
+ * currently live for fresh mail. Overwriting the live stored credential to
+ * match the old archive would have broken decryption of new incoming mail
+ * — passwordOverride lets a bulk import use its own one-off password
+ * without touching what's stored for the live pipeline.
  */
 export async function decryptArchive(
   zipBuffer: Buffer,
   rtaType: "CAMS" | "KFINTECH",
   expectedDistributorId?: string,
+  passwordOverride?: string,
 ): Promise<DecryptedArchive> {
+  if (passwordOverride) {
+    const { fileName, contents } = await extractFirstEntry(zipBuffer, passwordOverride);
+    return {
+      fileContents: contents,
+      sourceFormat: detectSourceFormat(fileName),
+      candidateDistributorId: expectedDistributorId,
+    };
+  }
+
   const candidates = await listDecryptedCredentials(rtaType, expectedDistributorId);
 
   for (const candidate of candidates) {
