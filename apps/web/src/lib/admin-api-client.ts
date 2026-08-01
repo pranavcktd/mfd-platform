@@ -1,4 +1,4 @@
-import { ApiError } from "./api-client";
+import { ApiError, API_BASE } from "./api-client";
 
 const ADMIN_KEY_STORAGE_KEY = "mfd.adminKey";
 
@@ -16,7 +16,7 @@ export function clearAdminKey(): void {
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const key = getAdminKey();
-  const response = await fetch(`/api${path}`, {
+  const response = await fetch(`${API_BASE}${path}`, {
     ...init,
     headers: {
       "Content-Type": "application/json",

@@ -1,5 +1,5 @@
 import { useMutation } from "@tanstack/react-query";
-import { getAccessToken, ApiError } from "../lib/api-client";
+import { getAccessToken, ApiError, API_BASE } from "../lib/api-client";
 
 export interface CasPreviewFolio {
   key: string;
@@ -68,7 +68,7 @@ export function useCasPreview() {
       const formData = new FormData();
       formData.append("file", input.file);
       formData.append("password", input.password);
-      return postForm<CasPreviewResult>("/api/import-external/cas/preview", formData);
+      return postForm<CasPreviewResult>(`${API_BASE}/import-external/cas/preview`, formData);
     },
   });
 }
@@ -84,7 +84,7 @@ export function useCasImport() {
       formData.append("file", input.file);
       formData.append("password", input.password);
       formData.append("selectedKeys", JSON.stringify(input.selectedKeys));
-      return postForm<CasImportResult>("/api/import-external/cas", formData);
+      return postForm<CasImportResult>(`${API_BASE}/import-external/cas`, formData);
     },
   });
 }

@@ -18,6 +18,15 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
 
+  // Only needed once the frontend is on a different origin than the API
+  // (e.g. Vercel + Railway) — locally they share an origin via vite's dev
+  // proxy, so this is a no-op there. CORS_ORIGIN is a comma-separated
+  // allowlist; unset means "allow any origin", which is fine here since the
+  // real access gate is this app's own auth (JWT/admin-key/PAN login), not
+  // CORS — narrow it once the deployed frontend origin is known.
+  const corsOrigin = process.env.CORS_ORIGIN;
+  app.enableCors({ origin: corsOrigin ? corsOrigin.split(",").map((o) => o.trim()) : true, credentials: true });
+
   // Idempotent — only creates the single seeded "Admin" row if the table is
   // empty, so this is safe to run on every boot.
   await app.get(AdminAuthService).ensureSeeded();

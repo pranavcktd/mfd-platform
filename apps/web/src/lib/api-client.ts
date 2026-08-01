@@ -1,3 +1,9 @@
+// Relative "/api" works locally via vite.config.ts's dev proxy and in any
+// deployment where the frontend and API share an origin. When they're on
+// separate hosts (e.g. Vercel + Railway), set VITE_API_BASE_URL at build
+// time to the API's full origin instead.
+export const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "/api";
+
 const TOKEN_STORAGE_KEY = "mfd.accessToken";
 
 export function getAccessToken(): string | null {
@@ -24,7 +30,7 @@ export class ApiError extends Error {
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const token = getAccessToken();
-  const response = await fetch(`/api${path}`, {
+  const response = await fetch(`${API_BASE}${path}`, {
     ...init,
     headers: {
       "Content-Type": "application/json",
