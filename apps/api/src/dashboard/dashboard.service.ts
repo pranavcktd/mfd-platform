@@ -50,6 +50,7 @@ export class DashboardService {
 
     const [
       aumAgg,
+      liveAumRows,
       totalClients,
       nonPanClients,
       activeSipAgg,
@@ -58,6 +59,19 @@ export class DashboardService {
       topClientRows,
     ] = await Promise.all([
       prisma.folio.aggregate({ where: folioWhere, _sum: { valuationAmount: true } }),
+      // Independently derived from today's real AMFI NAV × each folio's
+      // last-known unit balance — not the RTA's own (often weeks-stale)
+      // valuationAmount snapshot. Only sums folios whose scheme has been
+      // matched to a live NAV (see nav-sync.processor.ts / Folio.isin);
+      // NULL (not 0) when none have, so the frontend can distinguish
+      // "genuinely zero" from "no live data yet".
+      prisma.$queryRaw<Array<{ liveAum: string | null }>>`
+        SELECT SUM(f.balance_units * sm.latest_nav)::text AS "liveAum"
+        FROM folios f
+        JOIN scheme_master sm ON sm.isin = f.isin AND sm.latest_nav IS NOT NULL
+        WHERE f.distributor_id = ${distributorId}::uuid
+          ${arnScope ? Prisma.sql`AND f.arn_profile_id = ANY(${arnScope}::uuid[])` : Prisma.empty}
+      `,
       prisma.client.count({ where: clientWhere }),
       prisma.client.count({ where: { ...clientWhere, panNumber: null } }),
       prisma.sipRegistration.aggregate({ where: sipWhere, _sum: { sipAmount: true } }),
@@ -103,6 +117,7 @@ export class DashboardService {
 
     return {
       totalAum: aumAgg._sum.valuationAmount?.toString() ?? "0",
+      liveAum: liveAumRows[0]?.liveAum ?? null,
       totalClients,
       nonPanClients,
       monthlySipValue: activeSipAgg._sum.sipAmount?.toString() ?? "0",
@@ -122,6 +137,7 @@ export class DashboardService {
   private emptySummary() {
     return {
       totalAum: "0",
+      liveAum: null,
       totalClients: 0,
       nonPanClients: 0,
       monthlySipValue: "0",

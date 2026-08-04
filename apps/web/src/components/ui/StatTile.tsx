@@ -8,7 +8,7 @@ interface StatTileProps {
   subValue?: string;
   icon: LucideIcon;
   href?: string;
-  accent?: "series-1" | "series-2" | "series-4" | "series-5";
+  accent?: "series-1" | "series-2" | "series-3" | "series-4" | "series-5" | "series-6";
 }
 
 // Tailwind's content scanner needs literal class strings, not runtime template
@@ -16,8 +16,10 @@ interface StatTileProps {
 const ACCENT_CLASSES: Record<NonNullable<StatTileProps["accent"]>, { bg: string; text: string }> = {
   "series-1": { bg: "bg-series-1/10", text: "text-series-1" },
   "series-2": { bg: "bg-series-2/10", text: "text-series-2" },
+  "series-3": { bg: "bg-series-3/10", text: "text-series-3" },
   "series-4": { bg: "bg-series-4/10", text: "text-series-4" },
   "series-5": { bg: "bg-series-5/10", text: "text-series-5" },
+  "series-6": { bg: "bg-series-6/10", text: "text-series-6" },
 };
 
 export function StatTile({ label, value, subValue, icon: Icon, href, accent = "series-1" }: StatTileProps) {

@@ -159,7 +159,7 @@ export type NormalizedTransactionType =
   | "DIVIDEND_PAYOUT"
   | "OTHER";
 
-const FLAG_TO_NORMALIZED: Record<RtaTransactionFlag, NormalizedTransactionType> = {
+export const FLAG_TO_NORMALIZED: Record<RtaTransactionFlag, NormalizedTransactionType> = {
   P: "PURCHASE",
   R: "REDEMPTION",
   SI: "SWITCH_IN",
@@ -169,26 +169,72 @@ const FLAG_TO_NORMALIZED: Record<RtaTransactionFlag, NormalizedTransactionType> 
   DP: "DIVIDEND_PAYOUT",
 };
 
+/**
+ * Convenience wrapper for backfilling already-stored "OTHER"-typed
+ * transactions that never had a `transactionTypeCode` persisted at all
+ * (older ingested rows, confirmed for real: 62,852 of 63,431 real OTHER
+ * rows in the live database) — the description alone is enough to
+ * reclassify these without needing the original code.
+ */
+export function normalizedTypeFromDescription(description: string): NormalizedTransactionType | null {
+  const flag = classifyByDescription(description);
+  return flag ? FLAG_TO_NORMALIZED[flag] : null;
+}
+
 export interface ResolvedTransactionType {
   code: string;
   description: string;
   isRejection: boolean;
   normalizedType: NormalizedTransactionType;
   /**
-   * False when the code wasn't found in RTA_TRANSACTION_TYPES. This table
-   * was built from KFintech's "TRTypes & Flags" reference and matches
+   * False when the code wasn't found in RTA_TRANSACTION_TYPES (even if the
+   * plain-English description fallback below still classified it) — this
+   * table was built from KFintech's "TRTypes & Flags" reference and matches
    * KFintech's own TD_TRTYPE values well, but CAMS's native WBR-series DBF
    * reports use a much larger, scheme/campaign-specific code system (300+
    * distinct codes seen in one real sample file, e.g. "PSI01S", "SO3",
-   * "DRB3") that doesn't overlap this table at all. Rather than guess a
-   * classification from the code's prefix — which risks silently mis-
-   * counting a redemption as a purchase in AUM/dashboard aggregates —
-   * unrecognized codes resolve to normalizedType "OTHER" with this flag
-   * false, so callers can exclude/flag them instead of trusting a guess.
-   * Building a real CAMS code table needs either CAMS's own documentation
-   * or enough labeled samples to derive one; it hasn't been done yet.
+   * "DRB3") that doesn't overlap this table at all. Building a real CAMS
+   * code table needs either CAMS's own documentation or enough labeled
+   * samples to derive one; it hasn't been done yet.
    */
   isRecognized: boolean;
+}
+
+/**
+ * Fallback classifier for when the raw code isn't in RTA_TRANSACTION_TYPES —
+ * CAMS's real WBR2 DBF carries a separate plain-English `TRXN_TYPE_` field
+ * (already captured as `transactionDescription`, used today only as a
+ * display label) that's a far more tractable classification signal than
+ * CAMS's own opaque code system. Verified against the REAL distribution of
+ * every "OTHER"-typed transaction across the live database (62,743 rows,
+ * 24 distinct description strings) before writing these patterns — the top
+ * 11 descriptions alone cover 99.9%+ of that volume and map unambiguously.
+ * Deliberately fail-closed: every pattern here is a POSITIVE match on a
+ * known real description; a handful of ambiguous short codes seen in real
+ * data ("TOCOB", "TICOB", "TIXT", "TOXT", "DRO" — likely broker-transfer/
+ * change-of-broker events, not simple purchase/redemption) match none of
+ * these patterns and correctly fall through to OTHER rather than being
+ * guessed at. Order matters: redemption/switch-out are checked before the
+ * generic purchase pattern so e.g. "Partial Switch Out" (no "purchase"
+ * text at all) can never be misread.
+ */
+export function classifyByDescription(description: string): RtaTransactionFlag | null {
+  const d = description.trim();
+  if (/redemption/i.test(d)) return "R";
+  if (/switch\s*.*out|transfer\s*out/i.test(d)) return "SO";
+  if (/switch\s*.*in|transfer\s*in|\bti\b.*folio/i.test(d)) return "SI";
+  if (/dividend.*payout/i.test(d)) return "DP";
+  if (/dividend.*reinvest/i.test(d)) return "DR";
+  if (/bonus/i.test(d)) return "BO";
+  // Covers "Additional/Fresh Purchase(...Systematic)" and NFO purchase
+  // variants ("NFO SI", "NFOAP", "NFOAS", "NFO FP", "NFOFS" — real data
+  // confirmed both "NFO " and concatenated "NFOxx" forms exist, so this is
+  // a plain startsWith check, not a word-boundary match). NFO's own "SI"
+  // here means "Systematic Investment" (a purchase), unrelated to the
+  // SWITCH_IN flag checked above, which is why this comes after that check
+  // and requires the literal "nfo" prefix, not a bare "si".
+  if (/purchase|^nfo/i.test(d)) return "P";
+  return null;
 }
 
 /**
@@ -196,16 +242,22 @@ export interface ResolvedTransactionType {
  * normalized transaction type. `isRejection` reflects the RTA's own N/R mode
  * marker on the code — callers should exclude rejected records from AUM/
  * valid-transaction aggregates while still keeping them queryable.
+ *
+ * `description` (the RTA's own plain-English label, when the caller has it)
+ * is consulted ONLY when the code itself isn't recognized — a real, high-
+ * value fallback found by checking what CAMS's "OTHER"-typed transactions
+ * actually looked like on real client data (see classifyByDescription).
  */
-export function resolveTransactionType(code: string): ResolvedTransactionType {
+export function resolveTransactionType(code: string, description?: string | null): ResolvedTransactionType {
   const normalizedCode = code.toUpperCase().trim();
   const entry = BY_CODE.get(normalizedCode);
   if (!entry) {
+    const fallbackFlag = description ? classifyByDescription(description) : null;
     return {
       code: normalizedCode,
       description: "Unrecognized transaction type code",
       isRejection: false,
-      normalizedType: "OTHER",
+      normalizedType: fallbackFlag ? FLAG_TO_NORMALIZED[fallbackFlag] : "OTHER",
       isRecognized: false,
     };
   }

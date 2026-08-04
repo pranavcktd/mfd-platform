@@ -63,6 +63,27 @@ const MFSD201_ALIASES = {
   assetClass: { dbf: "ASSETTYPE", cams: "SCHEME_TYP", csv: "AssetType" },
 } as const;
 
+/// ISIN — real column confirmed in KFintech's own MFSD201 CSV export ("ISIN").
+/// CAMS's WBR2 DBF has no equivalent field at all (checked the real field
+/// list directly: AMC_CODE, FOLIO_NO, ... no ISIN-shaped column) — CAMS
+/// folios instead get their isin via the WBR39 scheme-master name-join
+/// (crm-sync.ts). No confirmed real KFintech .dbf sample exists to name the
+/// DBF field, so this is CSV-only, same caution as transactionDescription's
+/// dbf alias above.
+const ISIN_CSV_COLUMN = "ISIN";
+
+/// REMARKS/REV_REMARK — real CAMS WBR2 DBF fields, confirmed present in a
+/// real field-list dump (AMC_CODE, FOLIO_NO, ... REMARKS ... REV_REMARK,
+/// ...) this session, distinct from transactionDescription/TRXN_TYPE_
+/// (which only labels the transaction TYPE, e.g. "Purchase Rejection", not
+/// WHY it was rejected). REV_REMARK is checked first — more specific to an
+/// actual rejection/reversal than the general-purpose REMARKS field. No
+/// KFintech equivalent has been confirmed against real data, so this is
+/// CAMS-only, same caution as every other unverified-for-KFintech field
+/// above.
+const CAMS_REMARKS_COLUMN = "REMARKS";
+const CAMS_REV_REMARK_COLUMN = "REV_REMARK";
+
 type Mfsd201Field = keyof typeof MFSD201_ALIASES;
 
 export interface NormalizedTransactionRecord {
@@ -93,6 +114,8 @@ export interface NormalizedTransactionRecord {
   brokerArnCode?: string;
   subBrokerCode?: string;
   euin?: string;
+  isin?: string;
+  rejectionReason?: string;
 }
 
 function resolveAliasKey(format: RtaSourceFormat, rtaType: RtaType): "dbf" | "cams" | "csv" {
@@ -140,7 +163,8 @@ export function mapMfsd201Record(
   const reportCode = "MFSD201";
 
   const transactionTypeCode = requireString(get("transactionTypeCode"), "transactionTypeCode", reportCode);
-  const resolvedType = resolveTransactionType(transactionTypeCode);
+  const transactionDescription = optionalString(get("transactionDescription"));
+  const resolvedType = resolveTransactionType(transactionTypeCode, transactionDescription);
 
   return {
     amcCode: requireString(get("amcCode"), "amcCode", reportCode),
@@ -152,7 +176,7 @@ export function mapMfsd201Record(
     transactionNumber: optionalString(get("transactionNumber")),
     transactionTypeCode,
     transactionType: resolvedType.normalizedType,
-    transactionDescription: optionalString(get("transactionDescription")),
+    transactionDescription,
     isRejection: resolvedType.isRejection,
     isRecognizedTransactionType: resolvedType.isRecognized,
     postDate: parseRtaDate(get("postDate")) ?? (() => {
@@ -168,5 +192,11 @@ export function mapMfsd201Record(
     brokerArnCode: optionalString(get("brokerArnCode")),
     subBrokerCode: optionalString(get("subBrokerCode")),
     euin: optionalString(get("euin")),
+    isin: rtaType === "KFINTECH" ? optionalString(rawRecord[headerLookup.get(ISIN_CSV_COLUMN.toLowerCase()) ?? ""]) : undefined,
+    rejectionReason:
+      rtaType === "CAMS"
+        ? optionalString(rawRecord[headerLookup.get(CAMS_REV_REMARK_COLUMN.toLowerCase()) ?? ""]) ??
+          optionalString(rawRecord[headerLookup.get(CAMS_REMARKS_COLUMN.toLowerCase()) ?? ""])
+        : undefined,
   };
 }

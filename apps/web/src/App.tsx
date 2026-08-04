@@ -22,6 +22,8 @@ import { SuperAdminLoginPage } from "./pages/SuperAdminLoginPage";
 import { SuperAdminMfdListPage } from "./pages/SuperAdminMfdListPage";
 import { SuperAdminOnboardPage } from "./pages/SuperAdminOnboardPage";
 import { SuperAdminMailSyncPage } from "./pages/SuperAdminMailSyncPage";
+import { SuperAdminNavSyncPage } from "./pages/SuperAdminNavSyncPage";
+import { SuperAdminDataQualityPage } from "./pages/SuperAdminDataQualityPage";
 import { SuperAdminFolderImportPage } from "./pages/SuperAdminFolderImportPage";
 import { SuperAdminEquityMasterPage } from "./pages/SuperAdminEquityMasterPage";
 import { SuperAdminStatusPage } from "./pages/SuperAdminStatusPage";
@@ -59,6 +61,8 @@ export function App() {
                 <Route path="/" element={<SuperAdminMfdListPage />} />
                 <Route path="/onboard" element={<SuperAdminOnboardPage />} />
                 <Route path="/mail-sync" element={<SuperAdminMailSyncPage />} />
+                <Route path="/nav-sync" element={<SuperAdminNavSyncPage />} />
+                <Route path="/data-quality" element={<SuperAdminDataQualityPage />} />
                 <Route path="/folder-import" element={<SuperAdminFolderImportPage />} />
                 <Route path="/equity-master" element={<SuperAdminEquityMasterPage />} />
                 <Route path="/status" element={<SuperAdminStatusPage />} />

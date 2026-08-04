@@ -3,23 +3,28 @@ import { prisma } from "@mfd/db";
 import { ClientTenantContext } from "../client-tenant/client-tenant-context";
 import { computeFolioInvestedAmount } from "../reports/cost-basis";
 import { resolveDisplayAmcName } from "../reports/amc-display-name";
+import { fetchLatestNavByIsin, computeLiveValue, type SchemeNavLookup } from "../reports/live-valuation";
 
-function mapFolio(f: {
-  id: string;
-  schemeName: string | null;
-  amcCode: string;
-  folioNumber: string;
-  schemeCode: string;
-  assetClass: string | null;
-  balanceUnits: unknown;
-  valuationAmount: unknown;
-  navPerUnit: unknown;
-  balanceAsOfDate: Date | null;
-  source: string;
-  rtaType: string | null;
-  sipRegistrations?: Array<{ isActive: boolean }>;
-  transactions?: Array<{ transactionType: string; amount: unknown; units: unknown; isRejection: boolean }>;
-}) {
+function mapFolio(
+  f: {
+    id: string;
+    schemeName: string | null;
+    amcCode: string;
+    folioNumber: string;
+    schemeCode: string;
+    assetClass: string | null;
+    balanceUnits: unknown;
+    valuationAmount: unknown;
+    navPerUnit: unknown;
+    balanceAsOfDate: Date | null;
+    source: string;
+    rtaType: string | null;
+    isin: string | null;
+    sipRegistrations?: Array<{ isActive: boolean }>;
+    transactions?: Array<{ transactionType: string; amount: unknown; units: unknown; isRejection: boolean }>;
+  },
+  navByIsin: Map<string, SchemeNavLookup>,
+) {
   return {
     id: f.id,
     schemeName: f.schemeName,
@@ -30,9 +35,10 @@ function mapFolio(f: {
     assetClass: f.assetClass,
     balanceUnits: f.balanceUnits?.toString() ?? null,
     valuationAmount: f.valuationAmount?.toString() ?? null,
-    investedAmount: computeFolioInvestedAmount(f.transactions ?? []).toFixed(2),
+    investedAmount: computeFolioInvestedAmount(f.transactions ?? [], f.balanceUnits ? Number(f.balanceUnits) : null).toFixed(2),
     navPerUnit: f.navPerUnit?.toString() ?? null,
     balanceAsOfDate: f.balanceAsOfDate,
+    ...computeLiveValue(f.balanceUnits, navByIsin.get(f.isin ?? "")),
     activeSips: f.sipRegistrations?.filter((s) => s.isActive).length ?? 0,
     source: f.source,
   };
@@ -71,6 +77,7 @@ export class ClientPortalService {
       },
     });
 
+    const navByIsin = await fetchLatestNavByIsin(client.folios.map((f) => f.isin));
     const folioIds = client.folios.map((f) => f.id);
     const recentTransactions = await prisma.transaction.findMany({
       where: { folioId: { in: folioIds } },
@@ -145,7 +152,7 @@ export class ClientPortalService {
       mustChangePassword: client.mustChangePassword,
       totalAum: totalAum.toString(),
       assetAllocation,
-      folios: client.folios.map(mapFolio),
+      folios: client.folios.map((f) => mapFolio(f, navByIsin)),
       otherAssets: client.otherAssets.map((a) => ({
         id: a.id,
         assetType: a.assetType,
@@ -195,6 +202,7 @@ export class ClientPortalService {
     if (!member) {
       throw new NotFoundException("Family member not found");
     }
+    const navByIsin = await fetchLatestNavByIsin(member.folios.map((f) => f.isin));
     return {
       id: member.id,
       name: member.name,
@@ -202,7 +210,7 @@ export class ClientPortalService {
       phone: member.phone,
       panNumber: member.panNumber,
       totalAum: member.folios.reduce((sum, f) => sum + Number(f.valuationAmount ?? 0), 0).toString(),
-      folios: member.folios.map(mapFolio),
+      folios: member.folios.map((f) => mapFolio(f, navByIsin)),
     };
   }
 

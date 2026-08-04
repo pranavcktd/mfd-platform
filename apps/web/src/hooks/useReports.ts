@@ -104,12 +104,12 @@ export function useAumReport(arnProfileIds?: string[]) {
   });
 }
 
-export function useTransactionsReport(page: number, type?: string, arnProfileIds?: string[]) {
+export function useTransactionsReport(page: number, type?: string, arnProfileIds?: string[], from?: string, to?: string) {
   return useQuery({
-    queryKey: ["reports-transactions", page, type, arnProfileIds],
+    queryKey: ["reports-transactions", page, type, arnProfileIds, from, to],
     queryFn: () =>
       apiClient.get<Paginated & { transactions: TransactionRow[] }>(
-        `/reports/transactions${buildQuery({ page, type, arnProfileIds: arnQueryValue(arnProfileIds) })}`,
+        `/reports/transactions${buildQuery({ page, type, from, to, arnProfileIds: arnQueryValue(arnProfileIds) })}`,
       ),
   });
 }
@@ -195,16 +195,107 @@ export interface CapitalGainRow {
   clientName: string;
   folioNumber: string;
   schemeName: string | null;
-  realizedGain?: string;
-  unrealizedGain?: string;
+  taxCategory: "EQUITY" | "DEBT_OR_OTHER";
+  stcgGain: string;
+  ltcgGain: string;
+  /** Null when the correct rate depends on the investor's income slab (debt-fund gains) rather than a flat statutory rate. */
+  estimatedTax: string | null;
+  /** Sum of gain where estimatedTax couldn't be computed (taxed at the investor's own slab rate). */
+  taxNotComputableGain: string;
+  /** True if any lot was purchased before Jan 31, 2018 and is eligible for equity grandfathering (Section 112A cost-basis floor). */
+  grandfatheringNote: boolean;
+  /** True if grandfathering was actually applied using a real backfilled Jan 31, 2018 NAV — false means the eligible lot's gain is still overstated pending a NAV backfill. */
+  grandfatheringApplied: boolean;
+  /** Only meaningful for the unrealized report — whether currentValue used today's live AMFI NAV or fell back to the RTA's own snapshot. */
+  valuationSource?: "RTA" | "LIVE_NAV";
   asOfOrDate: string | null;
 }
 
-export function useCapitalGainsReport(type: "realized" | "notional", arnProfileIds?: string[]) {
+export interface CapitalGainsFilters {
+  type: "realized" | "notional";
+  arnProfileIds?: string[];
+  clientId?: string;
+  /** ISO date strings, April 1 - March 31 — only meaningful for realized (filters by sale date); ignored for notional. */
+  fyStartDate?: string;
+  fyEndDate?: string;
+}
+
+/**
+ * `enabled: false` until a clientId is chosen — this report is only
+ * generated on demand (client picked, financial year picked, "Generate"
+ * clicked), not auto-fetched for the whole book on tab load like it used
+ * to be.
+ */
+export function useCapitalGainsReport(filters: CapitalGainsFilters, enabled: boolean) {
   return useQuery({
-    queryKey: ["reports-capital-gains", type, arnProfileIds],
+    queryKey: ["reports-capital-gains", filters],
     queryFn: () =>
-      apiClient.get<CapitalGainRow[]>(`/reports/client/capital-gains${buildQuery({ type, arnProfileIds: arnQueryValue(arnProfileIds) })}`),
+      apiClient.get<CapitalGainRow[]>(
+        `/reports/client/capital-gains${buildQuery({
+          type: filters.type,
+          arnProfileIds: arnQueryValue(filters.arnProfileIds),
+          clientId: filters.clientId,
+          fyStartDate: filters.fyStartDate,
+          fyEndDate: filters.fyEndDate,
+        })}`,
+      ),
+    enabled,
+  });
+}
+
+export interface CapitalGainLotRow {
+  folioId: string;
+  clientId: string;
+  clientName: string;
+  folioNumber: string;
+  schemeName: string | null;
+  taxCategory: "EQUITY" | "DEBT_OR_OTHER";
+  purchaseDate: string;
+  /** Null for the notional (unrealized) report — a still-held lot has no sale date. */
+  saleDate: string | null;
+  units: string;
+  costBasis: string;
+  saleProceeds: string;
+  gain: string;
+  holdingDays: number;
+  classification: "STCG" | "LTCG";
+  estimatedTax: string | null;
+  grandfatheringApplicable: boolean;
+  grandfatheringApplied: boolean;
+}
+
+/**
+ * One row per FIFO lot (not per folio) — the actual line-by-line breakdown
+ * needed for ITR Schedule 112A/CG filing, where the folio-aggregated
+ * `useCapitalGainsReport` only gives a quick overview.
+ */
+export function useCapitalGainsDetailReport(filters: CapitalGainsFilters, enabled: boolean) {
+  return useQuery({
+    queryKey: ["reports-capital-gains-detail", filters],
+    queryFn: () =>
+      apiClient.get<CapitalGainLotRow[]>(
+        `/reports/client/capital-gains/detail${buildQuery({
+          type: filters.type,
+          arnProfileIds: arnQueryValue(filters.arnProfileIds),
+          clientId: filters.clientId,
+          fyStartDate: filters.fyStartDate,
+          fyEndDate: filters.fyEndDate,
+        })}`,
+      ),
+    enabled,
+  });
+}
+
+export interface ClientTransactionDateRange {
+  minDate: string | null;
+  maxDate: string | null;
+}
+
+export function useClientTransactionDateRange(clientId: string | undefined) {
+  return useQuery({
+    queryKey: ["client-transaction-date-range", clientId],
+    queryFn: () => apiClient.get<ClientTransactionDateRange>(`/reports/client/${clientId}/transaction-date-range`),
+    enabled: !!clientId,
   });
 }
 
@@ -249,10 +340,10 @@ export interface SipDueRow {
   estimatedNextDueDate: string;
 }
 
-export function useSipDueReport(arnProfileIds?: string[]) {
+export function useSipDueReport(arnProfileIds?: string[], withinDays?: number) {
   return useQuery({
-    queryKey: ["reports-sip-due", arnProfileIds],
-    queryFn: () => apiClient.get<SipDueRow[]>(`/reports/distributor/sip-due${buildQuery({ arnProfileIds: arnQueryValue(arnProfileIds) })}`),
+    queryKey: ["reports-sip-due", arnProfileIds, withinDays],
+    queryFn: () => apiClient.get<SipDueRow[]>(`/reports/distributor/sip-due${buildQuery({ withinDays, arnProfileIds: arnQueryValue(arnProfileIds) })}`),
   });
 }
 
@@ -264,10 +355,10 @@ export interface SipExpiringRow {
   endDate: string | null;
 }
 
-export function useSipExpiringReport(arnProfileIds?: string[]) {
+export function useSipExpiringReport(arnProfileIds?: string[], withinDays?: number) {
   return useQuery({
-    queryKey: ["reports-sip-expiring", arnProfileIds],
-    queryFn: () => apiClient.get<SipExpiringRow[]>(`/reports/distributor/sip-expiring${buildQuery({ arnProfileIds: arnQueryValue(arnProfileIds) })}`),
+    queryKey: ["reports-sip-expiring", arnProfileIds, withinDays],
+    queryFn: () => apiClient.get<SipExpiringRow[]>(`/reports/distributor/sip-expiring${buildQuery({ withinDays, arnProfileIds: arnQueryValue(arnProfileIds) })}`),
   });
 }
 
@@ -368,12 +459,28 @@ export function useSipStpExpiringCamsReport(page: number, arnProfileIds?: string
   });
 }
 
+export interface ClientReturnFolioRow {
+  folioId: string;
+  folioNumber: string;
+  schemeName: string | null;
+  amcCode: string;
+  schemeCode: string;
+  xirr: string | null;
+  currentValue: string;
+  invested: string;
+  dayChangeAmount: string | null;
+  dayChangePercent: string | null;
+}
+
 export interface ClientReturnRow {
   clientId: string;
   clientName: string;
   xirr: string | null;
   currentValue: string;
   totalInvested: string;
+  /** Sum of scheme-wise day-changes — null until at least 2 days of real AMFI NAV history have accumulated for this client's schemes. */
+  dayChangeAmount: string | null;
+  folios: ClientReturnFolioRow[];
 }
 
 export function useClientReturnsReport(arnProfileIds?: string[]) {

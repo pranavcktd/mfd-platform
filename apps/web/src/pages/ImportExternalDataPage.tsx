@@ -1,10 +1,10 @@
 import { useMemo, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
-import { Clock, AlertTriangle, ArrowLeft, UploadCloud } from "lucide-react";
+import { Clock, AlertTriangle, ArrowLeft, UploadCloud, Trash2 } from "lucide-react";
 import { Card } from "../components/ui/Card";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Amount } from "../components/ui/Amount";
-import { useCasImport, useCasPreview, type CasPreviewFolio } from "../hooks/useImportExternal";
+import { useCasImport, useCasPreview, useCasDataSummary, useDeleteCasData, type CasPreviewFolio } from "../hooks/useImportExternal";
 import { ApiError } from "../lib/api-client";
 
 type Step = "upload" | "preview" | "result";
@@ -366,6 +366,184 @@ function CasImportSection() {
   );
 }
 
+function CasDataManagementSection() {
+  const { data: summary, isLoading } = useCasDataSummary();
+  const deleteCasData = useDeleteCasData();
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [confirming, setConfirming] = useState(false);
+
+  const allFolioIds = useMemo(() => summary?.flatMap((c) => c.folios.map((f) => f.folioId)) ?? [], [summary]);
+  const selectedCount = selected.size;
+  const selectedValue = useMemo(() => {
+    if (!summary) return 0;
+    let total = 0;
+    for (const c of summary) {
+      for (const f of c.folios) {
+        if (selected.has(f.folioId)) total += Number(f.valuationAmount ?? 0);
+      }
+    }
+    return total;
+  }, [summary, selected]);
+
+  function toggleFolio(folioId: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(folioId)) next.delete(folioId);
+      else next.add(folioId);
+      return next;
+    });
+  }
+
+  function toggleClient(folioIds: string[], checked: boolean) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      for (const id of folioIds) {
+        if (checked) next.add(id);
+        else next.delete(id);
+      }
+      return next;
+    });
+  }
+
+  function toggleAll(checked: boolean) {
+    setSelected(checked ? new Set(allFolioIds) : new Set());
+  }
+
+  function handleConfirmedDelete() {
+    deleteCasData.mutate(Array.from(selected), {
+      onSuccess: () => {
+        setConfirming(false);
+        setSelected(new Set());
+      },
+    });
+  }
+
+  const hasData = (summary?.length ?? 0) > 0;
+  const allSelected = allFolioIds.length > 0 && selected.size === allFolioIds.length;
+
+  return (
+    <Card title="Manage CAS-Imported Data">
+      <p className="mb-3 text-xs text-ink-secondary">
+        Removes only data brought in via CAS import (tagged separately from your regular RTA mail sync at import
+        time) — your RTA-sourced folios and transactions are never touched, even for the same client. Pick specific
+        funds or whole clients to delete, or select everything.
+      </p>
+
+      {isLoading && <p className="text-sm text-ink-muted">Checking what's on file…</p>}
+      {!isLoading && !hasData && <p className="text-sm text-ink-muted">No CAS-imported data on file.</p>}
+
+      {!isLoading && hasData && summary && (
+        <div className="space-y-3">
+          <label className="flex items-center gap-2 text-xs font-medium text-ink-secondary">
+            <input type="checkbox" checked={allSelected} onChange={(e) => toggleAll(e.target.checked)} />
+            Select all ({allFolioIds.length} folio{allFolioIds.length !== 1 ? "s" : ""} across {summary.length} client
+            {summary.length !== 1 ? "s" : ""})
+          </label>
+
+          <div className="space-y-3">
+            {summary.map((c) => {
+              const folioIds = c.folios.map((f) => f.folioId);
+              const clientAllSelected = folioIds.every((id) => selected.has(id));
+              const clientSomeSelected = folioIds.some((id) => selected.has(id));
+              return (
+                <div key={c.clientId} className="overflow-hidden rounded-md border border-[var(--border)]">
+                  <div className="flex items-center justify-between bg-page px-3 py-2">
+                    <label className="flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={clientAllSelected}
+                        ref={(el) => { if (el) el.indeterminate = clientSomeSelected && !clientAllSelected; }}
+                        onChange={(e) => toggleClient(folioIds, e.target.checked)}
+                      />
+                      <span className="text-ink">{c.clientName}</span>
+                      {c.isAutoCreatedPendingReview && (
+                        <span className="rounded bg-status-warning/20 px-1.5 py-0.5 text-[10px] text-status-warning">
+                          created by CAS import
+                        </span>
+                      )}
+                      <span className="text-xs text-ink-muted">{c.panNumber ?? "no PAN"}</span>
+                    </label>
+                    <span className="text-xs text-ink-muted">{c.folios.length} folio(s)</span>
+                  </div>
+                  <table className="w-full text-left text-xs">
+                    <thead className="text-ink-secondary">
+                      <tr>
+                        <th className="w-8 px-3 py-1.5"></th>
+                        <th className="px-3 py-1.5 font-medium">Scheme</th>
+                        <th className="px-3 py-1.5 font-medium">AMC</th>
+                        <th className="px-3 py-1.5 font-medium">Folio</th>
+                        <th className="px-3 py-1.5 text-right font-medium">Txns</th>
+                        <th className="px-3 py-1.5 text-right font-medium">Value</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[var(--gridline)]">
+                      {c.folios.map((f) => (
+                        <tr key={f.folioId}>
+                          <td className="px-3 py-1.5">
+                            <input type="checkbox" checked={selected.has(f.folioId)} onChange={() => toggleFolio(f.folioId)} />
+                          </td>
+                          <td className="max-w-[220px] truncate px-3 py-1.5 text-ink" title={f.schemeName ?? undefined}>
+                            {f.schemeName ?? "—"}
+                          </td>
+                          <td className="px-3 py-1.5 text-ink-secondary">{f.amcCode.replace(/^CAS:/, "")}</td>
+                          <td className="px-3 py-1.5 text-ink-secondary">{f.folioNumber}</td>
+                          <td className="px-3 py-1.5 text-right tabular-nums text-ink-secondary">{f.transactionCount}</td>
+                          <td className="px-3 py-1.5 text-right tabular-nums text-ink"><Amount value={f.valuationAmount} /></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              );
+            })}
+          </div>
+
+          {deleteCasData.isError && (
+            <p className="rounded-md bg-status-critical/10 px-3 py-2 text-xs text-status-critical">
+              {deleteCasData.error instanceof ApiError ? deleteCasData.error.message : "Could not delete this data"}
+            </p>
+          )}
+
+          {!confirming ? (
+            <button
+              onClick={() => setConfirming(true)}
+              disabled={selectedCount === 0}
+              className="flex items-center gap-1.5 rounded-md border border-status-critical/40 px-3 py-1.5 text-sm font-medium text-status-critical hover:bg-status-critical/10 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Trash2 size={14} />
+              Delete Selected ({selectedCount})
+            </button>
+          ) : (
+            <div className="rounded-md border border-status-critical/40 bg-status-critical/10 p-3 text-sm">
+              <p className="flex items-center gap-2 font-medium text-status-critical">
+                <AlertTriangle size={15} />
+                This permanently deletes {selectedCount} folio(s) (<Amount value={String(selectedValue)} /> total) —
+                cannot be undone. A client auto-created purely from this data is also removed if it ends up with
+                nothing left after this.
+              </p>
+              <div className="mt-2 flex items-center gap-2">
+                <button
+                  onClick={handleConfirmedDelete}
+                  disabled={deleteCasData.isPending}
+                  className="rounded-md bg-status-critical px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50"
+                >
+                  {deleteCasData.isPending ? "Deleting…" : "Yes, delete selected"}
+                </button>
+                <button
+                  onClick={() => setConfirming(false)}
+                  className="rounded-md border border-[var(--border)] px-3 py-1.5 text-xs text-ink-secondary hover:bg-[var(--gridline)]/50"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </Card>
+  );
+}
+
 export function ImportExternalDataPage() {
   return (
     <div className="space-y-4">
@@ -384,6 +562,7 @@ export function ImportExternalDataPage() {
       </Card>
 
       <CasImportSection />
+      <CasDataManagementSection />
     </div>
   );
 }

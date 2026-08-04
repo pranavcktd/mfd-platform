@@ -2,6 +2,15 @@ import { Injectable } from "@nestjs/common";
 import { Prisma, prisma } from "@mfd/db";
 import { resolveAmcName } from "@mfd/shared";
 import { TenantContext } from "../tenant/tenant-context";
+import {
+  computeFifoRealizedGains,
+  computeFifoUnrealizedGain,
+  classifyAssetTaxCategory,
+  fetchGrandfatherNavByIsin,
+  type AssetTaxCategory,
+  type GainClassification,
+} from "./capital-gains";
+import { fetchLatestNavByIsin, computeLiveValue } from "./live-valuation";
 
 const PAGE_SIZE = 25;
 
@@ -528,38 +537,61 @@ export class ReportsService {
   }
 
   /**
-   * Client report: capital gains — deliberately labeled "approximate" in
-   * the frontend, not a tax-filing number. Uses a weighted-average cost
-   * basis per folio (avg cost = cumulative PURCHASE/SWITCH_IN amount ÷
-   * cumulative units bought so far, recomputed at each transaction), NOT
-   * FIFO lot matching — real capital-gains tax rules (LTCG/STCG holding
-   * periods, equity/debt classification, indexation, grandfathering) are
-   * out of scope here; this gives a directionally-useful "how much have
-   * you actually made" number, not a tax computation.
+   * Client report: capital gains — deliberately labeled "best-effort
+   * estimate" in the frontend, not a tax-filing document. Uses real FIFO
+   * lot matching (computeFifoRealizedGains/computeFifoUnrealizedGain in
+   * capital-gains.ts) — the method actually required for Indian MF capital
+   * gains — with current-law STCG/LTCG thresholds/rates, equity Section
+   * 112A grandfathering (when a real 2018-01-31 NAV has been backfilled),
+   * and live-AMFI-NAV current valuation where a folio's ISIN is known.
+   * Known gaps stated in the frontend's own caveat box: the ₹1.25L/year
+   * equity LTCG exemption isn't netted (an annual, cross-folio concept),
+   * and debt-fund STCG tax depends on the investor's own income slab
+   * (shown as gain only, no estimated tax).
    *
    * realized=true: gain on REDEMPTION/SWITCH_OUT transactions that have
    * already happened. realized=false (notional): unrealized gain on
-   * CURRENT holdings — current valuation minus units-held × average cost.
+   * CURRENT holdings — current valuation minus each remaining lot's cost.
+   *
+   * `fyStartDate`/`fyEndDate` (April 1 – March 31, computed by the caller)
+   * only filter REALIZED gains, by sale date — a notional/unrealized
+   * position has no sale date to filter by, it's inherently "as of today"
+   * regardless of which FY is picked, so the param is simply ignored for
+   * realized=false. The FIFO walk itself always uses the folio's FULL
+   * transaction history regardless of this filter (a sale in the selected
+   * FY still needs every earlier purchase to compute its real cost basis)
+   * — only the already-computed lots are filtered by saleDate afterward.
    */
-  async getCapitalGainsReport(realized: boolean, requestedArnProfileIds?: string[]) {
+  async getCapitalGainsReport(
+    realized: boolean,
+    requestedArnProfileIds?: string[],
+    clientId?: string,
+    fyStartDate?: Date,
+    fyEndDate?: Date,
+  ) {
     const distributorId = TenantContext.currentDistributorId();
     const arnScope = await this.resolveArnScope(requestedArnProfileIds);
     const folios = await prisma.folio.findMany({
-      where: { distributorId, ...(arnScope ? { arnProfileId: { in: arnScope } } : {}) },
+      where: { distributorId, ...(clientId ? { clientId } : {}), ...(arnScope ? { arnProfileId: { in: arnScope } } : {}) },
       select: {
         id: true,
         folioNumber: true,
         schemeName: true,
         amcCode: true,
+        assetClass: true,
+        isin: true,
         balanceUnits: true,
         valuationAmount: true,
         client: { select: { id: true, name: true } },
         transactions: {
           orderBy: { transactionDate: "asc" },
-          select: { transactionType: true, transactionDate: true, amount: true, units: true },
+          select: { transactionType: true, transactionDate: true, amount: true, units: true, isRejection: true },
         },
       },
     });
+
+    const navByIsin = realized ? new Map<string, { latestNav: number; latestNavDate: Date | null }>() : await fetchLatestNavByIsin(folios.map((f) => f.isin));
+    const grandfatherNavByIsin = await fetchGrandfatherNavByIsin(folios.map((f) => f.isin));
 
     const rows: Array<{
       folioId: string;
@@ -567,65 +599,259 @@ export class ReportsService {
       clientName: string;
       folioNumber: string;
       schemeName: string | null;
-      realizedGain?: string;
-      unrealizedGain?: string;
+      taxCategory: AssetTaxCategory;
+      stcgGain: string;
+      ltcgGain: string;
+      estimatedTax: string | null;
+      taxNotComputableGain: string;
+      grandfatheringNote: boolean;
+      grandfatheringApplied: boolean;
+      valuationSource: "RTA" | "LIVE_NAV";
       asOfOrDate: Date | null;
     }> = [];
 
     for (const folio of folios) {
-      let cumulativeUnits = 0;
-      let cumulativeCost = 0;
-      let realizedGainTotal = 0;
-      let lastRedemptionDate: Date | null = null;
-
-      for (const t of folio.transactions) {
-        const units = Number(t.units ?? 0);
-        const amount = Number(t.amount ?? 0);
-        if (t.transactionType === "PURCHASE" || t.transactionType === "SWITCH_IN" || t.transactionType === "BONUS") {
-          cumulativeUnits += units;
-          cumulativeCost += amount;
-        } else if (t.transactionType === "REDEMPTION" || t.transactionType === "SWITCH_OUT") {
-          const avgCostPerUnit = cumulativeUnits > 0 ? cumulativeCost / cumulativeUnits : 0;
-          const costOfUnitsSold = avgCostPerUnit * units;
-          realizedGainTotal += amount - costOfUnitsSold;
-          cumulativeUnits -= units;
-          cumulativeCost -= costOfUnitsSold;
-          lastRedemptionDate = t.transactionDate;
-        }
-      }
-
       if (realized) {
-        if (realizedGainTotal !== 0 || lastRedemptionDate) {
+        const allLots = computeFifoRealizedGains(folio.transactions, folio.assetClass, grandfatherNavByIsin.get(folio.isin ?? "") ?? null);
+        const lots =
+          fyStartDate && fyEndDate ? allLots.filter((l) => l.saleDate >= fyStartDate && l.saleDate <= fyEndDate) : allLots;
+        if (lots.length === 0) continue;
+
+        let stcgGain = 0;
+        let ltcgGain = 0;
+        let estimatedTax = 0;
+        let hasComputableTax = false;
+        let taxNotComputableGain = 0;
+        let grandfatheringNote = false;
+        let grandfatheringApplied = false;
+        let lastSaleDate: Date | null = null;
+
+        for (const lot of lots) {
+          if (lot.classification === "STCG") stcgGain += lot.gain;
+          else ltcgGain += lot.gain;
+          if (lot.estimatedTax !== null) {
+            estimatedTax += lot.estimatedTax;
+            hasComputableTax = true;
+          } else {
+            taxNotComputableGain += lot.gain;
+          }
+          if (lot.grandfatheringApplicable) grandfatheringNote = true;
+          if (lot.grandfatheringApplied) grandfatheringApplied = true;
+          if (!lastSaleDate || lot.saleDate > lastSaleDate) lastSaleDate = lot.saleDate;
+        }
+
+        rows.push({
+          folioId: folio.id,
+          clientId: folio.client.id,
+          clientName: folio.client.name,
+          folioNumber: folio.folioNumber,
+          schemeName: folio.schemeName,
+          taxCategory: classifyAssetTaxCategory(folio.assetClass),
+          stcgGain: stcgGain.toFixed(2),
+          ltcgGain: ltcgGain.toFixed(2),
+          estimatedTax: hasComputableTax ? estimatedTax.toFixed(2) : null,
+          taxNotComputableGain: taxNotComputableGain.toFixed(2),
+          grandfatheringNote,
+          grandfatheringApplied,
+          valuationSource: "RTA",
+          asOfOrDate: lastSaleDate,
+        });
+      } else {
+        const currentUnits = Number(folio.balanceUnits ?? 0);
+        const nav = navByIsin.get(folio.isin ?? "");
+        const liveValuation = computeLiveValue(folio.balanceUnits, nav);
+        const currentValue = liveValuation.liveValue !== null ? Number(liveValuation.liveValue) : Number(folio.valuationAmount ?? 0);
+        if (currentUnits <= 0 && currentValue <= 0) continue;
+
+        const lots = computeFifoUnrealizedGain(folio.transactions, folio.assetClass, currentUnits, currentValue, undefined, grandfatherNavByIsin.get(folio.isin ?? "") ?? null);
+        if (lots.length === 0) continue;
+
+        let stcgGain = 0;
+        let ltcgGain = 0;
+        let estimatedTax = 0;
+        let hasComputableTax = false;
+        let taxNotComputableGain = 0;
+        let grandfatheringNote = false;
+        let grandfatheringApplied = false;
+
+        for (const lot of lots) {
+          if (lot.classification === "STCG") stcgGain += lot.gain;
+          else ltcgGain += lot.gain;
+          if (lot.estimatedTax !== null) {
+            estimatedTax += lot.estimatedTax;
+            hasComputableTax = true;
+          } else {
+            taxNotComputableGain += lot.gain;
+          }
+          if (lot.grandfatheringApplicable) grandfatheringNote = true;
+          if (lot.grandfatheringApplied) grandfatheringApplied = true;
+        }
+
+        rows.push({
+          folioId: folio.id,
+          clientId: folio.client.id,
+          clientName: folio.client.name,
+          folioNumber: folio.folioNumber,
+          schemeName: folio.schemeName,
+          taxCategory: classifyAssetTaxCategory(folio.assetClass),
+          stcgGain: stcgGain.toFixed(2),
+          ltcgGain: ltcgGain.toFixed(2),
+          estimatedTax: hasComputableTax ? estimatedTax.toFixed(2) : null,
+          taxNotComputableGain: taxNotComputableGain.toFixed(2),
+          grandfatheringNote,
+          grandfatheringApplied,
+          valuationSource: liveValuation.liveValue !== null ? "LIVE_NAV" : "RTA",
+          asOfOrDate: null,
+        });
+      }
+    }
+
+    return rows;
+  }
+
+  /**
+   * Real min/max transaction date for one client — used to bound which
+   * financial years actually make sense to offer for that client's capital
+   * gains report (no point listing FY2018-19 if their earliest transaction
+   * is 2022), rather than a fixed hardcoded FY list.
+   */
+  async getClientTransactionDateRange(clientId: string) {
+    const distributorId = TenantContext.currentDistributorId();
+    const client = await prisma.client.findFirst({ where: { id: clientId, distributorId }, select: { id: true } });
+    if (!client) return { minDate: null, maxDate: null };
+    const result = await prisma.transaction.aggregate({
+      where: { distributorId, folio: { clientId } },
+      _min: { transactionDate: true },
+      _max: { transactionDate: true },
+    });
+    return {
+      minDate: result._min.transactionDate?.toISOString() ?? null,
+      maxDate: result._max.transactionDate?.toISOString() ?? null,
+    };
+  }
+
+  /**
+   * Transaction/lot-wise capital gains detail — one row per FIFO lot (each
+   * purchase-lot's contribution to a sale, or, for notional, each
+   * still-held lot), not one row per folio. The folio-aggregated
+   * `getCapitalGainsReport` is a quick overview; this is the real
+   * line-by-line breakdown (acquisition date, sale date, holding period,
+   * cost, proceeds, gain per lot) an actual ITR Schedule 112A/CG filing
+   * needs — a single STCG/LTCG total per folio hides exactly the detail a
+   * return requires. Same clientId/FY-range scoping and FIFO engine as
+   * getCapitalGainsReport (see that method's doc comment for the
+   * FY-filters-realized-only rationale); this only differs in NOT
+   * aggregating the lots before returning them.
+   */
+  async getCapitalGainsDetailReport(
+    realized: boolean,
+    requestedArnProfileIds?: string[],
+    clientId?: string,
+    fyStartDate?: Date,
+    fyEndDate?: Date,
+  ) {
+    const distributorId = TenantContext.currentDistributorId();
+    const arnScope = await this.resolveArnScope(requestedArnProfileIds);
+    const folios = await prisma.folio.findMany({
+      where: { distributorId, ...(clientId ? { clientId } : {}), ...(arnScope ? { arnProfileId: { in: arnScope } } : {}) },
+      select: {
+        id: true,
+        folioNumber: true,
+        schemeName: true,
+        assetClass: true,
+        isin: true,
+        balanceUnits: true,
+        valuationAmount: true,
+        client: { select: { id: true, name: true } },
+        transactions: {
+          orderBy: { transactionDate: "asc" },
+          select: { transactionType: true, transactionDate: true, amount: true, units: true, isRejection: true },
+        },
+      },
+    });
+
+    const navByIsin = realized ? new Map<string, { latestNav: number; latestNavDate: Date | null }>() : await fetchLatestNavByIsin(folios.map((f) => f.isin));
+    const grandfatherNavByIsin = await fetchGrandfatherNavByIsin(folios.map((f) => f.isin));
+
+    const rows: Array<{
+      folioId: string;
+      clientId: string;
+      clientName: string;
+      folioNumber: string;
+      schemeName: string | null;
+      taxCategory: AssetTaxCategory;
+      purchaseDate: Date;
+      saleDate: Date | null;
+      units: string;
+      costBasis: string;
+      saleProceeds: string;
+      gain: string;
+      holdingDays: number;
+      classification: GainClassification;
+      estimatedTax: string | null;
+      grandfatheringApplicable: boolean;
+      grandfatheringApplied: boolean;
+    }> = [];
+
+    for (const folio of folios) {
+      if (realized) {
+        const allLots = computeFifoRealizedGains(folio.transactions, folio.assetClass, grandfatherNavByIsin.get(folio.isin ?? "") ?? null);
+        const lots =
+          fyStartDate && fyEndDate ? allLots.filter((l) => l.saleDate >= fyStartDate && l.saleDate <= fyEndDate) : allLots;
+        for (const lot of lots) {
           rows.push({
             folioId: folio.id,
             clientId: folio.client.id,
             clientName: folio.client.name,
             folioNumber: folio.folioNumber,
             schemeName: folio.schemeName,
-            realizedGain: realizedGainTotal.toFixed(2),
-            asOfOrDate: lastRedemptionDate,
+            taxCategory: lot.taxCategory,
+            purchaseDate: lot.purchaseDate,
+            saleDate: lot.saleDate,
+            units: lot.units.toFixed(4),
+            costBasis: lot.costBasis.toFixed(2),
+            saleProceeds: lot.saleProceeds.toFixed(2),
+            gain: lot.gain.toFixed(2),
+            holdingDays: lot.holdingDays,
+            classification: lot.classification,
+            estimatedTax: lot.estimatedTax !== null ? lot.estimatedTax.toFixed(2) : null,
+            grandfatheringApplicable: lot.grandfatheringApplicable,
+            grandfatheringApplied: lot.grandfatheringApplied,
           });
         }
       } else {
-        const currentUnits = Number(folio.balanceUnits ?? cumulativeUnits);
-        const currentValue = Number(folio.valuationAmount ?? 0);
-        const avgCostPerUnit = cumulativeUnits > 0 ? cumulativeCost / cumulativeUnits : 0;
-        const currentCostBasis = avgCostPerUnit * currentUnits;
-        if (currentValue > 0 || currentCostBasis > 0) {
+        const currentUnits = Number(folio.balanceUnits ?? 0);
+        const nav = navByIsin.get(folio.isin ?? "");
+        const liveValuation = computeLiveValue(folio.balanceUnits, nav);
+        const currentValue = liveValuation.liveValue !== null ? Number(liveValuation.liveValue) : Number(folio.valuationAmount ?? 0);
+        if (currentUnits <= 0 && currentValue <= 0) continue;
+
+        const lots = computeFifoUnrealizedGain(folio.transactions, folio.assetClass, currentUnits, currentValue, undefined, grandfatherNavByIsin.get(folio.isin ?? "") ?? null);
+        for (const lot of lots) {
           rows.push({
             folioId: folio.id,
             clientId: folio.client.id,
             clientName: folio.client.name,
             folioNumber: folio.folioNumber,
             schemeName: folio.schemeName,
-            unrealizedGain: (currentValue - currentCostBasis).toFixed(2),
-            asOfOrDate: null,
+            taxCategory: lot.taxCategory,
+            purchaseDate: lot.purchaseDate,
+            saleDate: null,
+            units: lot.units.toFixed(4),
+            costBasis: lot.costBasis.toFixed(2),
+            saleProceeds: lot.currentValue.toFixed(2),
+            gain: lot.gain.toFixed(2),
+            holdingDays: lot.holdingDays,
+            classification: lot.classification,
+            estimatedTax: lot.estimatedTax !== null ? lot.estimatedTax.toFixed(2) : null,
+            grandfatheringApplicable: lot.grandfatheringApplicable,
+            grandfatheringApplied: lot.grandfatheringApplied,
           });
         }
       }
     }
 
-    return rows;
+    return rows.sort((a, b) => (a.saleDate ?? a.purchaseDate).getTime() - (b.saleDate ?? b.purchaseDate).getTime());
   }
 
   /** Distributor report: new clients and new AUM added per month, last 12 months — a real "how's the business growing" view. */
@@ -950,13 +1176,54 @@ export class ReportsService {
   }
 
   /**
+   * Latest two dated NAVs per ISIN from the real AMFI time series
+   * (scheme_nav_history — populated once daily by nav-sync.processor.ts as
+   * of the day this was added, so day-over-day change starts becoming
+   * available from the second day onward, not retroactively for history
+   * that predates this). Returns null entries (not a fabricated 0%) for any
+   * ISIN with fewer than 2 recorded days so far.
+   */
+  private async getLatestNavChangeByIsin(isins: string[]): Promise<Map<string, { latestNav: number; latestDate: Date; prevNav: number; prevDate: Date }>> {
+    const map = new Map<string, { latestNav: number; latestDate: Date; prevNav: number; prevDate: Date }>();
+    const uniqueIsins = Array.from(new Set(isins.filter(Boolean)));
+    if (uniqueIsins.length === 0) return map;
+
+    const rows = await prisma.$queryRaw<Array<{ isin: string; nav_date: Date; nav: Prisma.Decimal; rn: bigint }>>`
+      SELECT isin, nav_date, nav, rn FROM (
+        SELECT isin, nav_date, nav, ROW_NUMBER() OVER (PARTITION BY isin ORDER BY nav_date DESC) AS rn
+        FROM scheme_nav_history
+        WHERE isin = ANY(${uniqueIsins})
+      ) ranked
+      WHERE rn <= 2
+    `;
+    const byIsin = new Map<string, Array<{ nav_date: Date; nav: Prisma.Decimal; rn: bigint }>>();
+    for (const r of rows) {
+      const arr = byIsin.get(r.isin) ?? [];
+      arr.push(r);
+      byIsin.set(r.isin, arr);
+    }
+    for (const [isin, arr] of byIsin) {
+      const latest = arr.find((r) => r.rn === 1n);
+      const prev = arr.find((r) => r.rn === 2n);
+      if (latest && prev) {
+        map.set(isin, { latestNav: Number(latest.nav), latestDate: latest.nav_date, prevNav: Number(prev.nav), prevDate: prev.nav_date });
+      }
+    }
+    return map;
+  }
+
+  /**
    * Distributor report: per-client XIRR — a standard Newton-Raphson XIRR
    * over every PURCHASE/SWITCH_IN (negative cash flow) and
    * REDEMPTION/SWITCH_OUT (positive cash flow) transaction, plus current
    * valuation as a final positive cash flow "as if sold today". Skips
    * clients with fewer than 2 cash flows (XIRR needs at least one outflow
    * and one inflow) or where Newton-Raphson doesn't converge, rather than
-   * returning a misleading number.
+   * returning a misleading number. Also breaks each client down scheme-wise
+   * (own XIRR/invested/current per folio) and, where at least two days of
+   * real AMFI NAV history have accumulated for that folio's ISIN, a
+   * day-over-day change — both for the "expand to scheme-wise" structural
+   * view.
    */
   async getClientReturnsReport(requestedArnProfileIds?: string[]) {
     const distributorId = TenantContext.currentDistributorId();
@@ -973,6 +1240,13 @@ export class ReportsService {
         folios: {
           where: arnScope ? { arnProfileId: { in: arnScope } } : undefined,
           select: {
+            id: true,
+            folioNumber: true,
+            schemeName: true,
+            amcCode: true,
+            schemeCode: true,
+            isin: true,
+            balanceUnits: true,
             valuationAmount: true,
             transactions: { select: { transactionType: true, transactionDate: true, amount: true } },
           },
@@ -980,34 +1254,101 @@ export class ReportsService {
       },
     });
 
-    const results: Array<{ clientId: string; clientName: string; xirr: string | null; currentValue: string; totalInvested: string }> = [];
+    const allIsins = clients.flatMap((c) => c.folios.map((f) => f.isin).filter((x): x is string => !!x));
+    const navChangeByIsin = await this.getLatestNavChangeByIsin(allIsins);
+
+    function xirrFor(cashFlows: Array<{ date: Date; amount: number }>): string | null {
+      const xirr = cashFlows.length >= 2 ? computeXirr(cashFlows) : null;
+      return xirr !== null ? (xirr * 100).toFixed(2) : null;
+    }
+
+    const results: Array<{
+      clientId: string;
+      clientName: string;
+      xirr: string | null;
+      currentValue: string;
+      totalInvested: string;
+      dayChangeAmount: string | null;
+      folios: Array<{
+        folioId: string;
+        folioNumber: string;
+        schemeName: string | null;
+        amcCode: string;
+        schemeCode: string;
+        xirr: string | null;
+        currentValue: string;
+        invested: string;
+        dayChangeAmount: string | null;
+        dayChangePercent: string | null;
+      }>;
+    }> = [];
+
     for (const c of clients) {
-      const cashFlows: Array<{ date: Date; amount: number }> = [];
+      const clientCashFlows: Array<{ date: Date; amount: number }> = [];
       let totalInvested = 0;
+      let dayChangeTotal = 0;
+      let anyDayChange = false;
+      const folioResults: (typeof results)[number]["folios"] = [];
+
       for (const f of c.folios) {
+        const folioCashFlows: Array<{ date: Date; amount: number }> = [];
+        let folioInvested = 0;
         for (const t of f.transactions) {
           const amount = Number(t.amount ?? 0);
           if (amount === 0) continue;
           if (t.transactionType === "PURCHASE" || t.transactionType === "SWITCH_IN") {
-            cashFlows.push({ date: t.transactionDate, amount: -amount });
-            totalInvested += amount;
+            folioCashFlows.push({ date: t.transactionDate, amount: -amount });
+            folioInvested += amount;
           } else if (t.transactionType === "REDEMPTION" || t.transactionType === "SWITCH_OUT") {
-            cashFlows.push({ date: t.transactionDate, amount });
+            folioCashFlows.push({ date: t.transactionDate, amount });
           }
         }
-      }
-      const currentValue = c.folios.reduce((sum, f) => sum + Number(f.valuationAmount ?? 0), 0);
-      if (currentValue > 0) {
-        cashFlows.push({ date: new Date(), amount: currentValue });
+        const folioValue = Number(f.valuationAmount ?? 0);
+        const folioForXirr = [...folioCashFlows];
+        if (folioValue > 0) folioForXirr.push({ date: new Date(), amount: folioValue });
+
+        let dayChangeAmount: string | null = null;
+        let dayChangePercent: string | null = null;
+        const navChange = f.isin ? navChangeByIsin.get(f.isin) : undefined;
+        if (navChange && f.balanceUnits) {
+          const units = Number(f.balanceUnits);
+          const amount = units * (navChange.latestNav - navChange.prevNav);
+          dayChangeAmount = amount.toFixed(2);
+          dayChangePercent = navChange.prevNav !== 0 ? ((navChange.latestNav - navChange.prevNav) / navChange.prevNav * 100).toFixed(2) : null;
+          dayChangeTotal += amount;
+          anyDayChange = true;
+        }
+
+        folioResults.push({
+          folioId: f.id,
+          folioNumber: f.folioNumber,
+          schemeName: f.schemeName,
+          amcCode: f.amcCode,
+          schemeCode: f.schemeCode,
+          xirr: xirrFor(folioForXirr),
+          currentValue: folioValue.toString(),
+          invested: folioInvested.toString(),
+          dayChangeAmount,
+          dayChangePercent,
+        });
+
+        clientCashFlows.push(...folioCashFlows);
+        totalInvested += folioInvested;
       }
 
-      const xirr = cashFlows.length >= 2 ? computeXirr(cashFlows) : null;
+      const currentValue = c.folios.reduce((sum, f) => sum + Number(f.valuationAmount ?? 0), 0);
+      if (currentValue > 0) {
+        clientCashFlows.push({ date: new Date(), amount: currentValue });
+      }
+
       results.push({
         clientId: c.id,
         clientName: c.name,
-        xirr: xirr !== null ? (xirr * 100).toFixed(2) : null,
+        xirr: xirrFor(clientCashFlows),
         currentValue: currentValue.toString(),
         totalInvested: totalInvested.toString(),
+        dayChangeAmount: anyDayChange ? dayChangeTotal.toFixed(2) : null,
+        folios: folioResults.sort((a, b) => Number(b.currentValue) - Number(a.currentValue)),
       });
     }
 

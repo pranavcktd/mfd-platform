@@ -68,6 +68,7 @@ export function CrmPage() {
               <th className="px-4 py-2 font-medium">Email</th>
               <th className="px-4 py-2 font-medium">Mobile</th>
               <th className="px-4 py-2 font-medium">Folios</th>
+              <th className="px-4 py-2 text-right font-medium">Invested</th>
               <th className="px-4 py-2 text-right font-medium">Total AUM</th>
               <th className="px-4 py-2 font-medium">Onboarded</th>
             </tr>
@@ -75,7 +76,7 @@ export function CrmPage() {
           <tbody className="divide-y divide-[var(--gridline)]">
             {!isLoading && data?.clients.length === 0 && (
               <tr>
-                <td colSpan={7} className="px-4 py-6 text-center text-ink-muted">
+                <td colSpan={8} className="px-4 py-6 text-center text-ink-muted">
                   No clients found.
                 </td>
               </tr>
@@ -96,6 +97,7 @@ export function CrmPage() {
                 <td className="px-4 py-2 text-ink-secondary">{c.email ?? "—"}</td>
                 <td className="px-4 py-2 text-ink-secondary">{c.phone ?? "—"}</td>
                 <td className="px-4 py-2 text-ink-secondary">{c.folioCount}</td>
+                <td className="px-4 py-2 text-right tabular-nums text-ink-secondary"><Amount value={c.totalInvested} /></td>
                 <td className="px-4 py-2 text-right tabular-nums text-ink"><Amount value={c.totalAum} /></td>
                 <td className="px-4 py-2 text-ink-muted">{formatDate(c.createdAt)}</td>
               </tr>

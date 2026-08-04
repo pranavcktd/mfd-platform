@@ -5,3 +5,4 @@ export * from "./reports";
 export * from "./queue-names";
 export * from "./amc-names";
 export * from "./kfintech-amc-codes";
+export * from "./scheme-name-key";

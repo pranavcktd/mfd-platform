@@ -1,4 +1,5 @@
 export * from "./transaction-types";
+export * from "./parsing-utils";
 export * from "./mfsd201-transaction";
 export * from "./investor-master";
 export * from "./client-aum";

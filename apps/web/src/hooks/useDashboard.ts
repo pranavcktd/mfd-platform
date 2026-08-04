@@ -3,6 +3,8 @@ import { apiClient } from "../lib/api-client";
 
 export interface DashboardSummary {
   totalAum: string;
+  /** Independently computed from today's real AMFI NAV, not the RTA's own (often weeks-stale) snapshot — null when no folio's scheme has been matched to a live NAV yet. */
+  liveAum: string | null;
   totalClients: number;
   nonPanClients: number;
   monthlySipValue: string;

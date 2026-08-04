@@ -1,4 +1,31 @@
 import { Prisma, prisma } from "@mfd/db";
+import { schemeNameKey } from "@mfd/shared";
+
+/**
+ * Fills isin/assetClass/rtaType from a stored SchemeCorrectionRule
+ * (data-quality.service.ts) wherever the incoming record itself didn't
+ * supply a value — never overrides real incoming data, only fills a gap the
+ * RTA's own report left blank. This is what makes a manual admin fix (or a
+ * bulk "fix all folios with this same scheme" action) automatically apply
+ * to every FUTURE ingestion of that same scheme too, not just the folios
+ * that already existed when the fix was made.
+ */
+async function applyCorrectionRule(
+  amcCode: string,
+  schemeName: string | undefined,
+  current: { isin?: string; assetClass?: string; rtaType?: string },
+): Promise<{ isin?: string; assetClass?: string; rtaType?: string }> {
+  if (!schemeName || (current.isin && current.assetClass && current.rtaType)) return current;
+  const rule = await prisma.schemeCorrectionRule.findUnique({
+    where: { amcCode_schemeNameKey: { amcCode, schemeNameKey: schemeNameKey(schemeName) } },
+  });
+  if (!rule) return current;
+  return {
+    isin: current.isin ?? rule.isin ?? undefined,
+    assetClass: current.assetClass ?? rule.assetClass ?? undefined,
+    rtaType: current.rtaType ?? rule.rtaType ?? undefined,
+  };
+}
 
 async function upsertFolioRow(
   distributorId: string,
@@ -10,6 +37,7 @@ async function upsertFolioRow(
   schemeName?: string,
   assetClass?: string,
   rtaType?: string,
+  isin?: string,
 ): Promise<string> {
   // arnProfileId is set on both create AND update (not just create): every
   // caller in a given ingestion run resolves it from the same batch-wide
@@ -22,10 +50,12 @@ async function upsertFolioRow(
   // schemeName/assetClass only come from MFSD201/CLIENT_AUM records, not
   // investor-master — spread conditionally so an investor-master-only call
   // can't blank out a good value a transaction record already set.
+  const corrected = await applyCorrectionRule(amcCode, schemeName, { isin, assetClass, rtaType });
   const extra = {
     ...(schemeName ? { schemeName } : {}),
-    ...(assetClass ? { assetClass } : {}),
-    ...(rtaType ? { rtaType } : {}),
+    ...(corrected.assetClass ? { assetClass: corrected.assetClass } : {}),
+    ...(corrected.rtaType ? { rtaType: corrected.rtaType } : {}),
+    ...(corrected.isin ? { isin: corrected.isin } : {}),
   };
   const folio = await prisma.folio.upsert({
     where: { distributorId_amcCode_folioNumber_schemeCode: { distributorId, amcCode, folioNumber, schemeCode } },
@@ -46,6 +76,7 @@ interface TransactionClientFolioParams {
   schemeName?: string;
   assetClass?: string;
   rtaType?: string;
+  isin?: string;
 }
 
 /**
@@ -67,7 +98,7 @@ interface TransactionClientFolioParams {
 export async function resolveClientAndFolioId(
   params: TransactionClientFolioParams,
 ): Promise<{ clientId: string; folioId: string }> {
-  const { distributorId, arnProfileId, panNumber, investorName, amcCode, folioNumber, schemeCode, schemeName, assetClass, rtaType } =
+  const { distributorId, arnProfileId, panNumber, investorName, amcCode, folioNumber, schemeCode, schemeName, assetClass, rtaType, isin } =
     params;
 
   if (panNumber) {
@@ -86,6 +117,7 @@ export async function resolveClientAndFolioId(
       schemeName,
       assetClass,
       rtaType,
+      isin,
     );
     return { clientId: client.id, folioId };
   }
@@ -94,11 +126,13 @@ export async function resolveClientAndFolioId(
     where: { distributorId_amcCode_folioNumber_schemeCode: { distributorId, amcCode, folioNumber, schemeCode } },
   });
   if (existingFolio) {
+    const corrected = await applyCorrectionRule(amcCode, schemeName, { isin, assetClass, rtaType });
     const extra = {
       ...(arnProfileId && existingFolio.arnProfileId !== arnProfileId ? { arnProfileId } : {}),
       ...(schemeName ? { schemeName } : {}),
-      ...(assetClass ? { assetClass } : {}),
-      ...(rtaType ? { rtaType } : {}),
+      ...(corrected.assetClass ? { assetClass: corrected.assetClass } : {}),
+      ...(corrected.rtaType ? { rtaType: corrected.rtaType } : {}),
+      ...(corrected.isin ? { isin: corrected.isin } : {}),
     };
     if (Object.keys(extra).length > 0) {
       await prisma.folio.update({ where: { id: existingFolio.id }, data: extra });
@@ -106,8 +140,20 @@ export async function resolveClientAndFolioId(
     return { clientId: existingFolio.clientId, folioId: existingFolio.id };
   }
   const client = await prisma.client.create({ data: { distributorId, name: investorName ?? "Unknown" } });
+  const corrected = await applyCorrectionRule(amcCode, schemeName, { isin, assetClass, rtaType });
   const folio = await prisma.folio.create({
-    data: { distributorId, clientId: client.id, amcCode, folioNumber, schemeCode, arnProfileId, schemeName, assetClass, rtaType },
+    data: {
+      distributorId,
+      clientId: client.id,
+      amcCode,
+      folioNumber,
+      schemeCode,
+      arnProfileId,
+      schemeName,
+      assetClass: corrected.assetClass,
+      rtaType: corrected.rtaType,
+      isin: corrected.isin,
+    },
   });
   return { clientId: client.id, folioId: folio.id };
 }
@@ -234,6 +280,7 @@ interface FolioBalanceParams {
   valuationAmount?: number;
   navPerUnit?: number;
   asOfDate?: Date;
+  mailLogId?: string;
 }
 
 /**
@@ -242,9 +289,12 @@ interface FolioBalanceParams {
  * re-run ingestion (e.g. reprocessing an older backfill file after a fresh
  * daily one already landed) would regress current AUM with stale numbers.
  * Silently no-ops without an asOfDate, since there's nothing to compare.
+ * `mailLogId` (which real mail/file produced this balance snapshot) is
+ * re-asserted every time this update actually applies — real traceability
+ * requested directly ("show which RTA file this came from").
  */
 export async function updateFolioBalance(params: FolioBalanceParams): Promise<void> {
-  const { folioId, balanceUnits, valuationAmount, navPerUnit, asOfDate } = params;
+  const { folioId, balanceUnits, valuationAmount, navPerUnit, asOfDate, mailLogId } = params;
   if (!asOfDate) {
     return;
   }
@@ -257,7 +307,7 @@ export async function updateFolioBalance(params: FolioBalanceParams): Promise<vo
   }
   await prisma.folio.update({
     where: { id: folioId },
-    data: { balanceUnits, valuationAmount, navPerUnit, balanceAsOfDate: asOfDate },
+    data: { balanceUnits, valuationAmount, navPerUnit, balanceAsOfDate: asOfDate, lastBalanceMailLogId: mailLogId },
   });
 }
 
@@ -416,15 +466,23 @@ export async function upsertSchemeMasterRows(rowsIn: SchemeMasterUpsertRow[]): P
     total += result.length;
   }
 
+  // Real-data bug found and fixed 2026-08-02: this originally joined on
+  // (amc_code, scheme_code), which never matches — Folio.schemeCode is
+  // CAMS's transaction-report PRODCODE, a completely different code space
+  // than WBR39's own SCH_CODE (confirmed empirically: 0 matches out of
+  // 1,832 real CAMS folios). amc_code + case-insensitive scheme_name is the
+  // real working join (verified: 1,785/1,832 = 97.4% real match rate).
+  // Also backfills isin now, needed for live-NAV matching (nav-sync).
   await prisma.$executeRaw`
     UPDATE folios f
-    SET asset_class = sm.asset_class
+    SET asset_class = COALESCE(f.asset_class, sm.asset_class),
+        isin = COALESCE(f.isin, sm.isin)
     FROM scheme_master sm
     WHERE f.amc_code = sm.amc_code
-      AND f.scheme_code = sm.scheme_code
+      AND lower(f.scheme_name) = lower(sm.scheme_name)
       AND f.rta_type = 'CAMS'
-      AND f.asset_class IS NULL
-      AND sm.asset_class IS NOT NULL
+      AND (f.asset_class IS NULL OR f.isin IS NULL)
+      AND (sm.asset_class IS NOT NULL OR sm.isin IS NOT NULL)
   `;
 
   return total;

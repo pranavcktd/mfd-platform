@@ -41,6 +41,18 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     const body = await response.json().catch(() => ({ message: response.statusText }));
+    // An expired/invalid token (401) previously left the app showing a
+    // vague "Could not load live data" forever with a stale token still
+    // sitting in localStorage — real 12h-token-expiry case caught live: the
+    // dashboard just silently failed instead of ever prompting a re-login.
+    // Hard redirect (not react-router) so it interrupts whatever was
+    // mid-fetch regardless of which component triggered it.
+    if (response.status === 401) {
+      clearAccessToken();
+      if (typeof window !== "undefined" && window.location.pathname !== "/login") {
+        window.location.href = "/login";
+      }
+    }
     throw new ApiError(response.status, body.message ?? "Request failed");
   }
 
@@ -56,5 +68,6 @@ export const apiClient = {
     request<T>(path, { method: "POST", body: body ? JSON.stringify(body) : undefined }),
   patch: <T>(path: string, body?: unknown) =>
     request<T>(path, { method: "PATCH", body: body ? JSON.stringify(body) : undefined }),
-  delete: <T>(path: string) => request<T>(path, { method: "DELETE" }),
+  delete: <T>(path: string, body?: unknown) =>
+    request<T>(path, { method: "DELETE", body: body ? JSON.stringify(body) : undefined }),
 };

@@ -3,12 +3,40 @@ import { createHash } from "node:crypto";
 import { PDFParse } from "pdf-parse";
 import { prisma } from "@mfd/db";
 import { TenantContext } from "../tenant/tenant-context";
+import { findSchemeMatches } from "../reports/scheme-matching";
 import { CasFolio, casFolioKey, parseCas } from "./cas-parser";
 
 const CAS_SOURCE = "CAS_IMPORT";
 const MONTHS: Record<string, number> = {
   Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5, Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11,
 };
+
+/**
+ * Only apply an auto-match with NO human review when it's this confident —
+ * unlike data-quality.service.ts's suggestion list (a human picks from
+ * several candidates there), a wrong ISIN attached here silently would
+ * misprice this folio's live value AND its capital-gains tax classification
+ * down the line, so the bar is intentionally high: real correct matches
+ * (verified against real UTI/Nippon India cases) score 1.1-1.5 once the
+ * AMC-name boost engages; real wrong-fund-same-AMC candidates land under 1.0.
+ */
+const CAS_ISIN_AUTO_MATCH_THRESHOLD = 1.2;
+
+/**
+ * CAS statements prefix each scheme with the RTA's own short scheme code
+ * (e.g. "HHPDGR-HDFC Pharma and Healthcare Fund Direct Growth (Non-Demat)")
+ * and suffix a demat-status note — neither exists in AMFI's own scheme
+ * names, so both are stripped before fuzzy-matching against scheme_master
+ * (real scheme_master names never start with a bare short alnum code
+ * directly followed by a hyphen, confirmed by checking real AMFI-sourced
+ * rows, so this can't accidentally eat a real AMC name's beginning).
+ */
+function cleanCasSchemeNameForMatching(schemeName: string): string {
+  return schemeName
+    .replace(/^[a-z0-9]{2,15}-/i, "")
+    .replace(/\s*\(\s*(non[\s-]?demat|demat)\s*\)\s*$/i, "")
+    .trim();
+}
 
 function parseCasDate(ddMonYyyy: string): Date {
   const [day, mon, year] = ddMonYyyy.split("-");
@@ -33,6 +61,30 @@ export interface ClientImportSummary {
   transactionsImported: number;
   transactionsSkipped: number;
   foliosFailed: Array<{ folioNumber: string; schemeName: string; reason: string }>;
+}
+
+export interface CasFolioSummary {
+  folioId: string;
+  schemeName: string | null;
+  amcCode: string;
+  folioNumber: string;
+  transactionCount: number;
+  valuationAmount: string | null;
+}
+
+export interface CasClientSummary {
+  clientId: string;
+  clientName: string;
+  panNumber: string | null;
+  /** Exists only because this exact CAS import created them (no PAN match at the time) — still flagged needsReview, so deleting all their folios below is likely to also remove the client itself. */
+  isAutoCreatedPendingReview: boolean;
+  folios: CasFolioSummary[];
+}
+
+export interface CasDataDeleteResult {
+  transactionsDeleted: number;
+  foliosDeleted: number;
+  clientsDeleted: number;
 }
 
 export interface CasPreviewFolio {
@@ -257,6 +309,19 @@ export class ImportExternalService {
           const amcCode = `CAS:${folioData.amcName ?? "Unknown AMC"}`;
           const schemeCode = `CAS:${folioData.schemeName}`;
 
+          // Try to identify the real ISIN so this folio gets a live AMFI NAV
+          // like any RTA-sourced holding, instead of being frozen at the
+          // valuation snapshot printed in the CAS PDF at import time. Only
+          // applied above a high confidence bar (see
+          // CAS_ISIN_AUTO_MATCH_THRESHOLD) since nothing reviews this match
+          // before it's attached — leaving isin null (folio still shows its
+          // CAS-snapshot current value, just not live) is the safe default
+          // when no candidate clears the bar.
+          const cleanedSchemeName = cleanCasSchemeNameForMatching(folioData.schemeName);
+          const matches = await findSchemeMatches(cleanedSchemeName, folioData.amcName, 1);
+          const matchedIsin =
+            matches[0] && matches[0].score >= CAS_ISIN_AUTO_MATCH_THRESHOLD ? matches[0].isin : null;
+
           const folio = await prisma.folio.upsert({
             where: {
               distributorId_amcCode_folioNumber_schemeCode: {
@@ -274,12 +339,14 @@ export class ImportExternalService {
               schemeCode,
               schemeName: folioData.schemeName,
               source: CAS_SOURCE,
+              isin: matchedIsin ?? undefined,
               balanceUnits: folioData.closingUnitBalance,
               valuationAmount: folioData.valuationAmount,
               navPerUnit: folioData.navPerUnit,
               balanceAsOfDate: folioData.valuationDate ? parseCasDate(folioData.valuationDate) : null,
             },
             update: {
+              isin: matchedIsin ?? undefined,
               balanceUnits: folioData.closingUnitBalance,
               valuationAmount: folioData.valuationAmount,
               navPerUnit: folioData.navPerUnit,
@@ -343,5 +410,110 @@ export class ImportExternalService {
       clients: clientSummaries,
       panNumbersFound: parsed.panNumbers,
     };
+  }
+
+  /**
+   * Real CAS-imported data currently on file, grouped per client and then
+   * per folio — lets the UI offer "delete this one fund" or "delete
+   * everything for this client" instead of only an all-or-nothing wipe.
+   */
+  async getCasDataSummary(): Promise<CasClientSummary[]> {
+    const distributorId = TenantContext.currentDistributorId();
+    const folios = await prisma.folio.findMany({
+      where: { distributorId, source: CAS_SOURCE },
+      select: {
+        id: true,
+        schemeName: true,
+        amcCode: true,
+        folioNumber: true,
+        valuationAmount: true,
+        client: { select: { id: true, name: true, panNumber: true, needsReview: true, reviewReason: true } },
+        _count: { select: { transactions: true } },
+      },
+      orderBy: { valuationAmount: "desc" },
+    });
+
+    const byClient = new Map<string, CasClientSummary>();
+    for (const f of folios) {
+      let entry = byClient.get(f.client.id);
+      if (!entry) {
+        entry = {
+          clientId: f.client.id,
+          clientName: f.client.name,
+          panNumber: f.client.panNumber,
+          isAutoCreatedPendingReview: f.client.needsReview && (f.client.reviewReason?.startsWith("Auto-created from CAS import") ?? false),
+          folios: [],
+        };
+        byClient.set(f.client.id, entry);
+      }
+      entry.folios.push({
+        folioId: f.id,
+        schemeName: f.schemeName,
+        amcCode: f.amcCode,
+        folioNumber: f.folioNumber,
+        transactionCount: f._count.transactions,
+        valuationAmount: f.valuationAmount?.toString() ?? null,
+      });
+    }
+    return Array.from(byClient.values());
+  }
+
+  /**
+   * Removes the given CAS-imported folios (and their transactions) for this
+   * distributor — scoped to an explicit folio id list so a partial "just
+   * this fund" or "just this client's folios" delete is a normal case, not
+   * a special one; the caller (frontend) computes "all of them" itself when
+   * the admin wants a full wipe. Every targeted id is re-checked against
+   * `source: "CAS_IMPORT"` here (not trusted blindly from the request) so
+   * this can never be used to delete a real RTA_MAILBACK folio even if a
+   * stale/tampered id list were somehow submitted.
+   *
+   * Transactions are deleted before their Folios (no ON DELETE CASCADE on
+   * that FK — a Folio with Transactions still pointing at it would
+   * otherwise fail to delete). Also removes any Client that exists ONLY
+   * because of a CAS import (the auto-create-on-no-PAN-match path in
+   * importCas, flagged needsReview with that exact reason) and now has zero
+   * folios left — a client matched by PAN to a pre-existing real client is
+   * never touched, since deleting their CAS folios above leaves their real
+   * RTA data untouched.
+   */
+  async deleteCasData(folioIds: string[]): Promise<CasDataDeleteResult> {
+    if (folioIds.length === 0) return { transactionsDeleted: 0, foliosDeleted: 0, clientsDeleted: 0 };
+    const distributorId = TenantContext.currentDistributorId();
+
+    const targetFolios = await prisma.folio.findMany({
+      where: { id: { in: folioIds }, distributorId, source: CAS_SOURCE },
+      select: { id: true, clientId: true },
+    });
+    if (targetFolios.length === 0) return { transactionsDeleted: 0, foliosDeleted: 0, clientsDeleted: 0 };
+    const targetFolioIds = targetFolios.map((f) => f.id);
+    const affectedClientIds = new Set(targetFolios.map((f) => f.clientId));
+
+    const { count: transactionsDeleted } = await prisma.transaction.deleteMany({
+      where: { distributorId, source: CAS_SOURCE, folioId: { in: targetFolioIds } },
+    });
+    const { count: foliosDeleted } = await prisma.folio.deleteMany({
+      where: { id: { in: targetFolioIds }, distributorId, source: CAS_SOURCE },
+    });
+
+    let clientsDeleted = 0;
+    for (const clientId of affectedClientIds) {
+      const client = await prisma.client.findUnique({
+        where: { id: clientId },
+        select: { needsReview: true, reviewReason: true },
+      });
+      if (!client?.needsReview || !client.reviewReason?.startsWith("Auto-created from CAS import")) continue;
+      const remainingFolios = await prisma.folio.count({ where: { clientId } });
+      if (remainingFolios > 0) continue;
+      try {
+        await prisma.client.delete({ where: { id: clientId } });
+        clientsDeleted++;
+      } catch {
+        // Some other real data (nominee, bank account, other asset, ...)
+        // still references this client — leave it, don't force it.
+      }
+    }
+
+    return { transactionsDeleted, foliosDeleted, clientsDeleted };
   }
 }

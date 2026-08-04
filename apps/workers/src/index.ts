@@ -9,13 +9,15 @@ config({ path: resolve(__dirname, "../../../.env") });
 import { Worker } from "bullmq";
 import { createRedisConnection } from "./redis-connection";
 import { QueueNames } from "@mfd/shared";
-import { mailIngestionQueue, syncHealthCheckQueue } from "./queues/queue-producers";
+import { mailIngestionQueue, syncHealthCheckQueue, navSyncQueue } from "./queues/queue-producers";
 import { processMailIngestion } from "./processors/mail-ingestion.processor";
 import { processArchiveDecryption } from "./processors/archive-decryption.processor";
 import { processSchemaMapping } from "./processors/schema-mapping.processor";
 import { processAnalyticsCalc } from "./processors/analytics-calc.processor";
 import { processFolderImport } from "./processors/folder-import.processor";
 import { processSyncHealthCheck } from "./processors/sync-health-check.processor";
+import { processNavSync } from "./processors/nav-sync.processor";
+import { processNavHistoryBackfill } from "./processors/nav-history-backfill.processor";
 
 const connection = createRedisConnection();
 
@@ -29,6 +31,8 @@ const workers = [
   // mail-ingestion poll's concurrency slot.
   new Worker(QueueNames.FOLDER_IMPORT, processFolderImport, { connection, concurrency: 1 }),
   new Worker(QueueNames.SYNC_HEALTH_CHECK, processSyncHealthCheck, { connection }),
+  new Worker(QueueNames.NAV_SYNC, processNavSync, { connection }),
+  new Worker(QueueNames.NAV_HISTORY_BACKFILL, processNavHistoryBackfill, { connection }),
 ];
 
 for (const worker of workers) {
@@ -64,8 +68,17 @@ syncHealthCheckQueue()
     console.error("[workers] failed to register sync health check schedule:", err);
   });
 
+// Daily AMFI NAV pull — real mutual fund NAVs are published once a day
+// (not intraday), typically after market close, so a single evening run
+// covers it. Default 9:30pm; override via NAV_SYNC_CRON.
+const NAV_SYNC_CRON = process.env.NAV_SYNC_CRON ?? "30 21 * * *";
+navSyncQueue().upsertJobScheduler("nav-sync-schedule", { pattern: NAV_SYNC_CRON }, { name: "nav-sync" }).catch((err) => {
+  // eslint-disable-next-line no-console
+  console.error("[workers] failed to register NAV sync schedule:", err);
+});
+
 // eslint-disable-next-line no-console
-console.log(`[workers] started: ${workers.map((w) => w.name).join(", ")}, mail poll cron: ${MAIL_POLL_CRON}`);
+console.log(`[workers] started: ${workers.map((w) => w.name).join(", ")}, mail poll cron: ${MAIL_POLL_CRON}, nav sync cron: ${NAV_SYNC_CRON}`);
 
 process.on("SIGTERM", async () => {
   await Promise.all(workers.map((w) => w.close()));

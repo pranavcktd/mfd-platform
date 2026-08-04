@@ -19,6 +19,8 @@ import { ClientPortalModule } from "./client-portal/client-portal.module";
 import { AdminAuthModule } from "./admin-auth/admin-auth.module";
 import { ImportExternalModule } from "./import-external/import-external.module";
 import { EquityIsinMasterModule } from "./equity-isin-master/equity-isin-master.module";
+import { NavModule } from "./nav/nav.module";
+import { DataQualityModule } from "./data-quality/data-quality.module";
 
 @Module({
   imports: [
@@ -39,6 +41,8 @@ import { EquityIsinMasterModule } from "./equity-isin-master/equity-isin-master.
     AdminAuthModule,
     ImportExternalModule,
     EquityIsinMasterModule,
+    NavModule,
+    DataQualityModule,
   ],
   controllers: [HealthController],
   providers: [TenantMiddleware, ClientAuthMiddleware],

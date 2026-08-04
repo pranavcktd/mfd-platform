@@ -4,6 +4,7 @@ import { Prisma, prisma } from "@mfd/db";
 import { TenantContext } from "../tenant/tenant-context";
 import { computeFolioInvestedAmount } from "../reports/cost-basis";
 import { resolveDisplayAmcName } from "../reports/amc-display-name";
+import { fetchLatestNavByIsin, computeLiveValue } from "../reports/live-valuation";
 import { sendPortalLoginEmail } from "./portal-login-email";
 
 const PAGE_SIZE = 25;
@@ -19,6 +20,7 @@ export interface ClientListRow {
   createdAt: Date;
   folioCount: number;
   totalAum: string;
+  totalInvested: string;
   needsReview: boolean;
 }
 
@@ -74,7 +76,7 @@ export class CrmService {
     // merged_into_client_id IS NULL — merged-away clients (see mergeClients)
     // are excluded from the default roster; their history lives on under
     // the surviving client's id instead.
-    const clients = await prisma.$queryRaw<ClientListRow[]>`
+    const clients = await prisma.$queryRaw<Array<Omit<ClientListRow, "totalInvested">>>`
       SELECT c.id, c.name, c.pan_number AS "panNumber", c.email, c.phone, c.created_at AS "createdAt",
              c.needs_review AS "needsReview",
              COUNT(f.id)::int AS "folioCount",
@@ -96,7 +98,40 @@ export class CrmService {
       ${searchFilter}
     `;
 
-    return { total, page, pageSize: PAGE_SIZE, clients };
+    // "Invested" (weighted-average cost basis of currently-held units, same
+    // definition as ClientDetailPage's "Total Invested" tile via
+    // computeFolioInvestedAmount) isn't a plain SQL SUM — a redemption
+    // reduces cost proportionally, not just units — so it's computed here in
+    // JS same as getClientDetail does, but only for this page's clients
+    // (bounded by PAGE_SIZE), not the whole roster.
+    const pageClientIds = clients.map((c) => c.id);
+    const foliosForInvested = pageClientIds.length
+      ? await prisma.folio.findMany({
+          where: {
+            clientId: { in: pageClientIds },
+            ...(filters?.amcCode ? { amcCode: filters.amcCode } : {}),
+            ...(filters?.assetClass ? { assetClass: filters.assetClass } : {}),
+            ...(arnScope ? { arnProfileId: { in: arnScope } } : {}),
+          },
+          select: {
+            clientId: true,
+            balanceUnits: true,
+            transactions: { orderBy: { transactionDate: "asc" }, select: { transactionType: true, transactionDate: true, amount: true, units: true, isRejection: true } },
+          },
+        })
+      : [];
+    const investedByClient = new Map<string, number>();
+    for (const f of foliosForInvested) {
+      const prior = investedByClient.get(f.clientId) ?? 0;
+      investedByClient.set(f.clientId, prior + computeFolioInvestedAmount(f.transactions, f.balanceUnits ? Number(f.balanceUnits) : null));
+    }
+
+    const clientsWithInvested: ClientListRow[] = clients.map((c) => ({
+      ...c,
+      totalInvested: (investedByClient.get(c.id) ?? 0).toFixed(2),
+    }));
+
+    return { total, page, pageSize: PAGE_SIZE, clients: clientsWithInvested };
   }
 
   async getClientDetail(clientId: string) {
@@ -116,6 +151,7 @@ export class CrmService {
               orderBy: { transactionDate: "asc" },
               select: { transactionType: true, amount: true, units: true, isRejection: true },
             },
+            lastBalanceMailLog: { select: { subject: true, fromAddress: true, receivedAt: true, rtaType: true } },
           },
         },
         otherAssets: { orderBy: { asOfDate: "desc" } },
@@ -126,6 +162,8 @@ export class CrmService {
     if (!client) {
       throw new NotFoundException("Client not found");
     }
+
+    const navByIsin = await fetchLatestNavByIsin(client.folios.map((f) => f.isin));
 
     return {
       id: client.id,
@@ -181,13 +219,30 @@ export class CrmService {
         schemeName: f.schemeName,
         assetClass: f.assetClass,
         balanceUnits: f.balanceUnits?.toString() ?? null,
+        // RTA-reported snapshot — only as fresh as the last WBR4/MFSD203
+        // balance report for this folio, which can lag by weeks.
         valuationAmount: f.valuationAmount?.toString() ?? null,
-        investedAmount: computeFolioInvestedAmount(f.transactions).toFixed(2),
+        investedAmount: computeFolioInvestedAmount(f.transactions, f.balanceUnits ? Number(f.balanceUnits) : null).toFixed(2),
         navPerUnit: f.navPerUnit?.toString() ?? null,
         balanceAsOfDate: f.balanceAsOfDate,
+        // Independently computed from today's real AMFI NAV × the same
+        // balanceUnits — null (not a guess) when this scheme's ISIN hasn't
+        // been matched to a live NAV yet.
+        ...computeLiveValue(f.balanceUnits, navByIsin.get(f.isin ?? "")),
         activeSips: f.sipRegistrations.filter((s) => s.isActive).length,
         source: f.source,
         transactionCount: f.transactions.length,
+        // Which real mail/file the CURRENT balance snapshot came from —
+        // null for CAS-imported folios and for balances last touched before
+        // this field existed.
+        balanceSourceMail: f.lastBalanceMailLog
+          ? {
+              subject: f.lastBalanceMailLog.subject,
+              fromAddress: f.lastBalanceMailLog.fromAddress,
+              receivedAt: f.lastBalanceMailLog.receivedAt,
+              rtaType: f.lastBalanceMailLog.rtaType,
+            }
+          : null,
       })),
       otherAssets: client.otherAssets.map((a) => ({
         id: a.id,
@@ -235,7 +290,10 @@ export class CrmService {
         orderBy: { transactionDate: "desc" },
         skip: (page - 1) * CrmService.TRANSACTIONS_PAGE_SIZE,
         take: CrmService.TRANSACTIONS_PAGE_SIZE,
-        include: { folio: { select: { schemeName: true, folioNumber: true, amcCode: true, schemeCode: true } } },
+        include: {
+          folio: { select: { schemeName: true, folioNumber: true, amcCode: true, schemeCode: true } },
+          mailLog: { select: { subject: true, fromAddress: true, receivedAt: true, rtaType: true } },
+        },
       }),
     ]);
 
@@ -257,7 +315,11 @@ export class CrmService {
         navPerUnit: t.navPerUnit?.toString() ?? null,
         brokerageAmount: t.brokerageAmount?.toString() ?? null,
         isRejection: t.isRejection,
+        rejectionReason: t.rejectionReason,
         source: t.source,
+        sourceMail: t.mailLog
+          ? { subject: t.mailLog.subject, fromAddress: t.mailLog.fromAddress, receivedAt: t.mailLog.receivedAt, rtaType: t.mailLog.rtaType }
+          : null,
       })),
     };
   }
@@ -278,6 +340,7 @@ export class CrmService {
     const transactions = await prisma.transaction.findMany({
       where: { folioId },
       orderBy: { transactionDate: "desc" },
+      include: { mailLog: { select: { subject: true, fromAddress: true, receivedAt: true, rtaType: true } } },
     });
     return transactions.map((t) => ({
       id: t.id,
@@ -289,7 +352,11 @@ export class CrmService {
       units: t.units?.toString() ?? null,
       navPerUnit: t.navPerUnit?.toString() ?? null,
       isRejection: t.isRejection,
+      rejectionReason: t.rejectionReason,
       source: t.source,
+      sourceMail: t.mailLog
+        ? { subject: t.mailLog.subject, fromAddress: t.mailLog.fromAddress, receivedAt: t.mailLog.receivedAt, rtaType: t.mailLog.rtaType }
+        : null,
     }));
   }
 

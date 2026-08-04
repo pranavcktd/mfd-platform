@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Post, UploadedFile, UseInterceptors } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Delete, Get, Post, UploadedFile, UseInterceptors } from "@nestjs/common";
 import { FileInterceptor } from "@nestjs/platform-express";
 import { ImportExternalService } from "./import-external.service";
 
@@ -39,5 +39,18 @@ export class ImportExternalController {
     // if the client omits it, matching the pre-preview behavior.
     const keys: string[] | undefined = selectedKeys ? JSON.parse(selectedKeys) : undefined;
     return this.importExternalService.importCas(file.buffer, password, keys);
+  }
+
+  @Get("cas/summary")
+  getCasDataSummary() {
+    return this.importExternalService.getCasDataSummary();
+  }
+
+  @Delete("cas")
+  deleteCasData(@Body() body: { folioIds: string[] }) {
+    if (!body?.folioIds?.length) {
+      throw new BadRequestException("folioIds is required");
+    }
+    return this.importExternalService.deleteCasData(body.folioIds);
   }
 }

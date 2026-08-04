@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { Wallet, Users, UserX, Repeat, TrendingUp, Newspaper, ExternalLink, LayoutDashboard } from "lucide-react";
+import { Wallet, Users, UserX, Repeat, TrendingUp, Newspaper, ExternalLink, LayoutDashboard, Activity } from "lucide-react";
 import { StatTile } from "../components/ui/StatTile";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Card } from "../components/ui/Card";
@@ -31,13 +31,21 @@ export function DashboardPage() {
         )}
       </div>
 
-      <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-5">
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-6">
         <StatTile
           label="Total AUM"
           value={isLoading || !data ? "—" : formatInrCompact(data.totalAum)}
           subValue={isLoading || !data ? undefined : formatInrExact(data.totalAum)}
           icon={Wallet}
           accent="series-1"
+          href="/reports"
+        />
+        <StatTile
+          label="Live AUM (today's NAV)"
+          value={isLoading || !data ? "—" : data.liveAum === null ? "N/A" : formatInrCompact(data.liveAum)}
+          subValue={isLoading || !data || data.liveAum === null ? undefined : formatInrExact(data.liveAum)}
+          icon={Activity}
+          accent="series-6"
           href="/reports"
         />
         <StatTile

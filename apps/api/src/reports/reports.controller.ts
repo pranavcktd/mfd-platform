@@ -1,4 +1,4 @@
-import { Controller, Get, Query } from "@nestjs/common";
+import { Controller, Get, Param, Query } from "@nestjs/common";
 import { ReportsService } from "./reports.service";
 
 function parseArnIds(raw?: string): string[] | undefined {
@@ -110,8 +110,42 @@ export class ReportsController {
   }
 
   @Get("client/capital-gains")
-  getCapitalGains(@Query("type") type?: "realized" | "notional", @Query("arnProfileIds") arnProfileIds?: string) {
-    return this.reportsService.getCapitalGainsReport(type === "realized", parseArnIds(arnProfileIds));
+  getCapitalGains(
+    @Query("type") type?: "realized" | "notional",
+    @Query("arnProfileIds") arnProfileIds?: string,
+    @Query("clientId") clientId?: string,
+    @Query("fyStartDate") fyStartDate?: string,
+    @Query("fyEndDate") fyEndDate?: string,
+  ) {
+    return this.reportsService.getCapitalGainsReport(
+      type === "realized",
+      parseArnIds(arnProfileIds),
+      clientId,
+      fyStartDate ? new Date(fyStartDate) : undefined,
+      fyEndDate ? new Date(fyEndDate) : undefined,
+    );
+  }
+
+  @Get("client/:clientId/transaction-date-range")
+  getClientTransactionDateRange(@Param("clientId") clientId: string) {
+    return this.reportsService.getClientTransactionDateRange(clientId);
+  }
+
+  @Get("client/capital-gains/detail")
+  getCapitalGainsDetail(
+    @Query("type") type?: "realized" | "notional",
+    @Query("arnProfileIds") arnProfileIds?: string,
+    @Query("clientId") clientId?: string,
+    @Query("fyStartDate") fyStartDate?: string,
+    @Query("fyEndDate") fyEndDate?: string,
+  ) {
+    return this.reportsService.getCapitalGainsDetailReport(
+      type === "realized",
+      parseArnIds(arnProfileIds),
+      clientId,
+      fyStartDate ? new Date(fyStartDate) : undefined,
+      fyEndDate ? new Date(fyEndDate) : undefined,
+    );
   }
 
   // --- Distributor reports ---

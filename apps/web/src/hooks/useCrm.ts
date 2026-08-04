@@ -10,6 +10,7 @@ export interface ClientListItem {
   createdAt: string;
   folioCount: number;
   totalAum: string;
+  totalInvested: string;
   needsReview: boolean;
 }
 
@@ -38,6 +39,13 @@ export interface ClientListResponse {
   clients: ClientListItem[];
 }
 
+export interface SourceMailInfo {
+  subject: string | null;
+  fromAddress: string;
+  receivedAt: string | null;
+  rtaType: string;
+}
+
 export interface ClientFolio {
   id: string;
   amcCode: string;
@@ -47,13 +55,20 @@ export interface ClientFolio {
   schemeName: string | null;
   assetClass: string | null;
   balanceUnits: string | null;
+  /** RTA-reported snapshot — only as fresh as the last balance report for this folio. */
   valuationAmount: string | null;
   investedAmount: string;
   navPerUnit: string | null;
   balanceAsOfDate: string | null;
+  /** Independently computed from today's real AMFI NAV — null when this scheme hasn't been matched to a live NAV yet. */
+  liveNav: string | null;
+  liveNavDate: string | null;
+  liveValue: string | null;
   activeSips: number;
   source: string;
   transactionCount: number;
+  /** Which real mail/file the current balance snapshot came from — null for CAS-imported folios and balances last touched before this field existed. */
+  balanceSourceMail: SourceMailInfo | null;
 }
 
 export interface ClientOtherAsset {
@@ -79,7 +94,9 @@ export interface ClientTransaction {
   navPerUnit: string | null;
   brokerageAmount: string | null;
   isRejection: boolean;
+  rejectionReason?: string | null;
   source: string;
+  sourceMail?: SourceMailInfo | null;
 }
 
 export interface FolioTransaction {
@@ -92,7 +109,9 @@ export interface FolioTransaction {
   units: string | null;
   navPerUnit: string | null;
   isRejection: boolean;
+  rejectionReason?: string | null;
   source: string;
+  sourceMail?: SourceMailInfo | null;
 }
 
 export interface ClientDetail {

@@ -6,6 +6,8 @@ import type { ArchiveDecryptionJobData } from "../processors/archive-decryption.
 import type { SchemaMappingJobData } from "../processors/schema-mapping.processor";
 import type { AnalyticsCalcJobData } from "../processors/analytics-calc.processor";
 import type { SyncHealthCheckJobData } from "../processors/sync-health-check.processor";
+import type { NavSyncJobData } from "../processors/nav-sync.processor";
+import type { NavHistoryBackfillJobData } from "../processors/nav-history-backfill.processor";
 
 /**
  * Producer-side Queue handles, separate from the Worker (consumer) side in
@@ -51,4 +53,14 @@ export function analyticsCalcQueue(): Queue<AnalyticsCalcJobData> {
 let _syncHealthCheckQueue: Queue<SyncHealthCheckJobData> | undefined;
 export function syncHealthCheckQueue(): Queue<SyncHealthCheckJobData> {
   return (_syncHealthCheckQueue ??= new Queue(QueueNames.SYNC_HEALTH_CHECK, { connection: getConnection() }));
+}
+
+let _navSyncQueue: Queue<NavSyncJobData> | undefined;
+export function navSyncQueue(): Queue<NavSyncJobData> {
+  return (_navSyncQueue ??= new Queue(QueueNames.NAV_SYNC, { connection: getConnection() }));
+}
+
+let _navHistoryBackfillQueue: Queue<NavHistoryBackfillJobData> | undefined;
+export function navHistoryBackfillQueue(): Queue<NavHistoryBackfillJobData> {
+  return (_navHistoryBackfillQueue ??= new Queue(QueueNames.NAV_HISTORY_BACKFILL, { connection: getConnection() }));
 }

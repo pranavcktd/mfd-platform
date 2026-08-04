@@ -15,6 +15,9 @@ export interface ClientPortalFolio {
   investedAmount: string;
   navPerUnit: string | null;
   balanceAsOfDate: string | null;
+  liveNav: string | null;
+  liveNavDate: string | null;
+  liveValue: string | null;
   activeSips: number;
   source: string;
 }

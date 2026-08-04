@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { ChevronDown, ChevronRight, AlertTriangle } from "lucide-react";
+import { ChevronDown, ChevronRight, AlertTriangle, Mail } from "lucide-react";
 import { Amount } from "../ui/Amount";
 import { formatDate } from "../../lib/format";
-import { isNonZeroHolding, type HoldingFolio, type HoldingTransaction } from "../../lib/holdings-types";
+import { isNonZeroHolding, type HoldingFolio, type HoldingTransaction, type SourceMailInfo } from "../../lib/holdings-types";
 
 function SourceBadge({ source }: { source: string }) {
   if (source === "RTA_MAILBACK") return null;
@@ -13,16 +13,42 @@ function SourceBadge({ source }: { source: string }) {
   );
 }
 
+/** "Which RTA file did this come from" — real traceability, not guessed: the mail's own subject/sender/received date, captured at ingestion time. */
+function sourceMailTitle(mail: SourceMailInfo | null | undefined): string | undefined {
+  if (!mail) return undefined;
+  const parts = [`${mail.rtaType} mail`];
+  if (mail.receivedAt) parts.push(`received ${formatDate(mail.receivedAt)}`);
+  if (mail.subject) parts.push(`— "${mail.subject}"`);
+  return parts.join(" ");
+}
+
+function SourceMailIcon({ mail }: { mail: SourceMailInfo | null | undefined }) {
+  if (!mail) return null;
+  return (
+    <span title={sourceMailTitle(mail)} className="inline-flex shrink-0">
+      <Mail size={11} className="text-ink-muted" />
+    </span>
+  );
+}
+
 function TransactionRow({ t }: { t: HoldingTransaction }) {
   return (
     <tr className={t.isRejection ? "bg-status-critical/5" : undefined}>
-      <td className="py-1.5 pr-3 text-ink-muted">{formatDate(t.transactionDate)}</td>
+      <td className="py-1.5 pr-3 text-ink-muted">
+        <span className="inline-flex items-center gap-1">
+          {formatDate(t.transactionDate)}
+          <SourceMailIcon mail={t.sourceMail} />
+        </span>
+      </td>
       <td className="py-1.5 pr-3 text-ink-secondary">
         {t.transactionDescription ?? t.transactionType}
         {t.isRejection && (
-          <span className="ml-2 inline-flex items-center gap-1 rounded bg-status-critical/15 px-1.5 py-0.5 text-[10px] font-medium text-status-critical">
+          <span
+            className="ml-2 inline-flex items-center gap-1 rounded bg-status-critical/15 px-1.5 py-0.5 text-[10px] font-medium text-status-critical"
+            title={t.rejectionReason ?? undefined}
+          >
             <AlertTriangle size={10} />
-            Reverted / Failed
+            {t.rejectionReason ? `Failed: ${t.rejectionReason}` : "Reverted / Failed"}
           </span>
         )}
         <SourceBadge source={t.source} />
@@ -89,9 +115,10 @@ function FolioRow({
               {folio.schemeName ?? `${folio.amcCode}/${folio.schemeCode}`}
               <SourceBadge source={folio.source} />
             </p>
-            <p className="text-xs text-ink-muted">
+            <p className="inline-flex items-center gap-1 text-xs text-ink-muted">
               {folio.folioNumber} · {folio.assetClass ?? "—"} · {folio.balanceUnits ?? "0"} units
               {folio.balanceAsOfDate ? ` · as of ${formatDate(folio.balanceAsOfDate)}` : ""}
+              <SourceMailIcon mail={folio.balanceSourceMail} />
             </p>
           </div>
         </div>
@@ -101,9 +128,15 @@ function FolioRow({
             <Amount value={folio.investedAmount} className="tabular-nums text-ink-secondary" />
           </div>
           <div>
-            <p className="text-ink-muted">Current</p>
+            <p className="text-ink-muted">Current (RTA)</p>
             <Amount value={folio.valuationAmount} className="tabular-nums font-medium text-ink" />
           </div>
+          {folio.liveValue !== null && (
+            <div title={folio.liveNavDate ? `NAV ${folio.liveNav} as of ${formatDate(folio.liveNavDate)}` : undefined}>
+              <p className="text-ink-muted">Live (AMFI)</p>
+              <Amount value={folio.liveValue} className="tabular-nums font-medium text-series-6" />
+            </div>
+          )}
         </div>
       </button>
       {expanded && <FolioTransactions folioId={folio.id} useTransactions={useTransactions} />}

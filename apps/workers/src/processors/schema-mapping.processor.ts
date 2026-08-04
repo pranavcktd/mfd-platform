@@ -227,6 +227,7 @@ async function runSchemaMapping(args: {
             schemeName: r.schemeDescription,
             assetClass: r.assetClass,
             rtaType,
+            isin: r.isin,
           });
           folioCache.set(key, cached);
         }
@@ -250,6 +251,8 @@ async function runSchemaMapping(args: {
           brokerageAmount: r.brokerageAmount,
           isRejection: r.isRejection,
           transactionTypeCode: r.transactionTypeCode,
+          rejectionReason: r.rejectionReason,
+          mailLogId,
           idempotencyHash: rows[i].idempotencyHash,
         });
       }
@@ -336,6 +339,7 @@ async function runSchemaMapping(args: {
           schemeCode: r.productCode,
           schemeName: r.schemeDescription,
           rtaType,
+          isin: r.isin,
         });
         await updateFolioBalance({
           folioId,
@@ -343,6 +347,7 @@ async function runSchemaMapping(args: {
           valuationAmount: r.valuationAmount,
           navPerUnit: r.navPerUnit,
           asOfDate: r.reportDate,
+          mailLogId,
         });
       }
       break;

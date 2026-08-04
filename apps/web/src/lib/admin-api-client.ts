@@ -27,6 +27,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     const body = await response.json().catch(() => ({ message: response.statusText }));
+    // Same "don't fail silently forever" fix as api-client.ts — a
+    // missing/invalid admin key should bounce to the admin login, not leave
+    // every super-admin page showing a vague load error.
+    if (response.status === 401) {
+      clearAdminKey();
+      if (typeof window !== "undefined" && window.location.pathname !== "/super-admin/login") {
+        window.location.href = "/super-admin/login";
+      }
+    }
     throw new ApiError(response.status, body.message ?? "Request failed");
   }
 

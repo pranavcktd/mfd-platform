@@ -279,3 +279,151 @@ export function useBulkOnboard() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin-distributors"] }),
   });
 }
+
+// --- NAV sync (daily AMFI NAV pull + historical backfill) ---
+
+export interface NavSyncLogRow {
+  id: string;
+  triggeredAt: string;
+  completedAt: string | null;
+  status: "RUNNING" | "COMPLETED" | "FAILED";
+  syncType: "DAILY" | "HISTORY_BACKFILL";
+  fromDate: string | null;
+  toDate: string | null;
+  totalRowsInFile: number | null;
+  schemesMatched: number | null;
+  errorMessage: string | null;
+}
+
+export function useNavSyncLogs() {
+  return useQuery({
+    queryKey: ["admin-nav-logs"],
+    queryFn: () => adminApiClient.get<NavSyncLogRow[]>("/admin/nav/logs"),
+    // Short poll so a just-triggered sync's RUNNING -> COMPLETED transition
+    // shows up without the user needing to manually refresh.
+    refetchInterval: 5000,
+  });
+}
+
+export function useNavCheckNow() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => adminApiClient.post<{ jobId: string; triggeredAt: string }>("/admin/nav/check-now"),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin-nav-logs"] }),
+  });
+}
+
+export function useNavBackfillHistory() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { fromDate: string; toDate: string }) =>
+      adminApiClient.post<{ jobId: string; fromDate: string; toDate: string; triggeredAt: string }>(
+        "/admin/nav/backfill-history",
+        input,
+      ),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin-nav-logs"] }),
+  });
+}
+
+// --- Data quality (manual gap-filling for ISIN / RTA type / asset class) ---
+
+export type GapType = "NO_ISIN" | "NO_LIVE_NAV_MATCH" | "NO_RTA_TYPE" | "NO_ASSET_CLASS";
+
+export interface DataQualitySummaryRow {
+  gapType: GapType;
+  count: number;
+}
+
+export interface DataQualityFolioRow {
+  id: string;
+  folioNumber: string;
+  amcCode: string;
+  schemeName: string | null;
+  assetClass: string | null;
+  isin: string | null;
+  rtaType: string | null;
+  balanceUnits: string | null;
+  valuationAmount: string | null;
+  clientName: string;
+  distributorName: string;
+}
+
+export interface SchemeSuggestion {
+  schemeMasterId: string;
+  amcCode: string;
+  amcName: string | null;
+  schemeCode: string;
+  schemeName: string;
+  isin: string | null;
+  latestNav: string | null;
+  score: number;
+}
+
+export function useDataQualitySummary(distributorId?: string) {
+  return useQuery({
+    queryKey: ["admin-data-quality-summary", distributorId],
+    queryFn: () =>
+      adminApiClient.get<DataQualitySummaryRow[]>(
+        `/admin/data-quality/summary${distributorId ? `?distributorId=${distributorId}` : ""}`,
+      ),
+  });
+}
+
+export function useDataQualityGaps(gapType: GapType, distributorId?: string) {
+  const params = new URLSearchParams({ gapType });
+  if (distributorId) params.set("distributorId", distributorId);
+  return useQuery({
+    queryKey: ["admin-data-quality-folios", gapType, distributorId],
+    queryFn: () => adminApiClient.get<DataQualityFolioRow[]>(`/admin/data-quality/folios?${params.toString()}`),
+  });
+}
+
+/** Lazy — only fetched once a folio's "Fix" panel is actually opened, not for the whole list up front. */
+export function useDataQualitySuggestions(folioId: string | null) {
+  return useQuery({
+    queryKey: ["admin-data-quality-suggestions", folioId],
+    queryFn: () => adminApiClient.get<SchemeSuggestion[]>(`/admin/data-quality/folios/${folioId}/suggestions`),
+    enabled: !!folioId,
+  });
+}
+
+export interface SiblingFolio {
+  id: string;
+  folioNumber: string;
+  clientName: string;
+  distributorName: string;
+}
+
+export interface ApplyCorrectionResult {
+  id: string;
+  siblingFolios: SiblingFolio[];
+  /** The full field set actually applied, including any RTA type inferred from the ISIN's known scheme — pass this whole set to bulk-apply, not just the field originally sent, so siblings get the inference too. */
+  appliedFields: { isin?: string; assetClass?: string; rtaType?: string };
+}
+
+export function useApplyDataQualityFix() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ folioId, fields }: { folioId: string; fields: { isin?: string; assetClass?: string; rtaType?: string } }) =>
+      adminApiClient.patch<ApplyCorrectionResult>(`/admin/data-quality/folios/${folioId}`, fields),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["admin-data-quality-summary"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-data-quality-folios"] });
+    },
+  });
+}
+
+export function useBulkApplyDataQualityFix() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { folioIds: string[]; fields: { isin?: string; assetClass?: string; rtaType?: string } }) =>
+      adminApiClient.post<{ fixed: number }>("/admin/data-quality/folios/bulk-apply", {
+        folioIds: input.folioIds,
+        ...input.fields,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["admin-data-quality-summary"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-data-quality-folios"] });
+    },
+  });
+}

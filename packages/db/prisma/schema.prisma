@@ -1,10 +1,16 @@
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
 }
 
+// pg_trgm powers the data-quality module's fuzzy scheme-name matching
+// (data-quality.service.ts) — declared here so a fresh database (e.g. a new
+// deploy target) gets it via `prisma db push`/migrate, not just this dev DB
+// where it was enabled by hand first.
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [pg_trgm]
 }
 
 /// A tenant: the login account for an MFD business. Every row in every other
@@ -483,6 +489,26 @@ model Folio {
   aadhaarStatus        String?   @map("aadhaar_status")
   kycReportDate         DateTime? @map("kyc_report_date") @db.Date
 
+  /// Backfilled by matching (amcCode, lower(schemeName)) against the global
+  /// SchemeMaster table (verified against real data: exact scheme-code
+  /// join fails completely — Folio.schemeCode is CAMS's transaction-report
+  /// PRODCODE, a different code space than WBR39's own SCH_CODE — but
+  /// case-insensitive scheme-name matching hits 97.4% of real CAMS folios).
+  /// Used to look up a live AMFI NAV for this folio's scheme.
+  isin           String?     @map("isin")
+
+  /// Which real mail/file most recently updated this folio's balance
+  /// snapshot (CLIENT_AUM/WBR4/MFSD203) — traceability requested directly:
+  /// "wherever data is showing, show which RTA file it came from." Only
+  /// covers the balance snapshot, not the whole folio (a folio accumulates
+  /// data from many separate emails over time — investor-master, KYC,
+  /// each transaction file — a single FK can't represent "the" source for
+  /// all of it). Null for folios whose balance was last updated before
+  /// this field existed, and always null for CAS-imported folios (no mail
+  /// exists for those).
+  lastBalanceMailLogId String?           @map("last_balance_mail_log_id") @db.Uuid
+  lastBalanceMailLog   MailIngestionLog? @relation(fields: [lastBalanceMailLogId], references: [id])
+
   createdAt      DateTime    @default(now()) @map("created_at")
 
   transactions      Transaction[]
@@ -619,12 +645,82 @@ model SchemeMaster {
   minPurchaseAmount   Decimal?  @map("min_purchase_amount") @db.Decimal(20, 2)
   faceValue           Decimal?  @map("face_value") @db.Decimal(20, 2)
   parentSchemeCode    String?   @map("parent_scheme_code")
+  /// AMFI's official daily NAV, matched onto this scheme via ISIN (see
+  /// nav-sync.processor.ts). Real MF NAVs are published once a day, not
+  /// intraday — "latest known", same "one snapshot field, not a time
+  /// series" convention as Folio's own balance fields.
+  latestNav           Decimal?  @map("latest_nav") @db.Decimal(20, 4)
+  latestNavDate       DateTime? @map("latest_nav_date") @db.Date
   updatedAt           DateTime  @updatedAt @map("updated_at")
 
   @@unique([amcCode, schemeCode])
   @@index([isin])
   @@index([schemeName])
   @@map("scheme_master")
+}
+
+/// A manual data-quality correction (isin/assetClass/rtaType), remembered by
+/// (amcCode, normalized scheme name) so it applies TWICE: (1) immediately to
+/// every other existing folio sharing that same scheme+gap (the "fix all
+/// clients with this same issue" flow in data-quality.service.ts), and (2)
+/// automatically to any FUTURE folio ingested for that same scheme
+/// (crm-sync.ts's upsertFolioRow consults this before falling back to
+/// "still missing"), so the same scheme never needs fixing by hand twice.
+/// schemeNameKey is lower(trim(scheme_name)) — computed in application code,
+/// not a Postgres generated column, so the same normalization is guaranteed
+/// identical between the write path and every read path.
+model SchemeCorrectionRule {
+  id            String   @id @default(uuid()) @db.Uuid
+  amcCode       String   @map("amc_code")
+  schemeNameKey String   @map("scheme_name_key")
+  isin          String?
+  assetClass    String?  @map("asset_class")
+  rtaType       String?  @map("rta_type")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  @@unique([amcCode, schemeNameKey])
+  @@map("scheme_correction_rules")
+}
+
+/// A real dated NAV for one scheme (by ISIN), sourced from AMFI's
+/// historical-NAV report — a genuine time series, unlike SchemeMaster's own
+/// latestNav/latestNavDate ("latest known snapshot" only). Built specifically
+/// to unlock equity capital-gains grandfathering (the Jan 31, 2018 NAV
+/// cost-basis floor, Budget 2018), but general-purpose: any date can be
+/// backfilled via nav-history-backfill.processor.ts.
+model SchemeNavHistory {
+  id        String   @id @default(uuid()) @db.Uuid
+  isin      String
+  navDate   DateTime @map("nav_date") @db.Date
+  nav       Decimal  @db.Decimal(20, 4)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([isin, navDate])
+  @@index([isin])
+  @@map("scheme_nav_history")
+}
+
+/// Audit trail for the daily AMFI NAV sync — same "one row per run,
+/// updated in place as it moves from triggered to completed/failed"
+/// pattern as MailIngestionLog, so NAV sync has the same visible
+/// timestamp/status/detail history the RTA mail sync already has.
+model NavSyncLog {
+  id               String    @id @default(uuid()) @db.Uuid
+  triggeredAt      DateTime  @default(now()) @map("triggered_at")
+  completedAt      DateTime? @map("completed_at")
+  status           String    @default("RUNNING")
+  /// "DAILY" (the scheduled AMFI NAVAll.txt pull) or "HISTORY_BACKFILL"
+  /// (the on-demand date-range fetch, e.g. the 2018-01-31 grandfathering NAV).
+  syncType         String    @default("DAILY") @map("sync_type")
+  /// Only set for HISTORY_BACKFILL runs — the requested date range.
+  fromDate         DateTime? @map("from_date") @db.Date
+  toDate           DateTime? @map("to_date") @db.Date
+  totalRowsInFile  Int?      @map("total_rows_in_file")
+  schemesMatched   Int?      @map("schemes_matched")
+  errorMessage     String?   @map("error_message")
+
+  @@map("nav_sync_logs")
 }
 
 /// A SIP/STP registration on a folio (CAMS WBR49 / KFintech MFSD243).
@@ -711,6 +807,9 @@ model MailIngestionLog {
 
   createdAt     DateTime             @default(now()) @map("created_at")
   updatedAt     DateTime             @updatedAt @map("updated_at")
+
+  transactions          Transaction[]
+  foliosLastBalanced    Folio[]
 
   @@index([rtaType, createdAt])
   @@index([distributorId])
@@ -802,8 +901,26 @@ model Transaction {
   /// in RTA_TRANSACTION_TYPES (isRecognizedTransactionType false).
   transactionTypeCode String? @map("transaction_type_code")
 
+  /// CAMS WBR2's own REMARKS/REV_REMARK fields (confirmed present in a real
+  /// DBF field list this session) — plain-English text for WHY a rejection/
+  /// reversal happened, distinct from transactionDescription (which is just
+  /// the transaction TYPE's label, e.g. "Purchase Rejection", not a reason).
+  /// REV_REMARK is preferred when both are populated (more specific to a
+  /// rejection than the general-purpose REMARKS field). No KFintech
+  /// equivalent has been confirmed against real data — null for KFintech
+  /// and CAS-imported rows, not guessed.
+  rejectionReason String? @map("rejection_reason")
+
+  /// Which real mail/file this specific transaction was ingested from —
+  /// traceability requested directly ("show which RTA file this came
+  /// from"). Null for rows ingested before this field existed and for
+  /// CAS-imported rows (no mail exists for those).
+  mailLogId       String?          @map("mail_log_id") @db.Uuid
+  mailLog         MailIngestionLog? @relation(fields: [mailLogId], references: [id])
+
   createdAt       DateTime    @default(now()) @map("created_at")
 
   @@index([distributorId, folioId, transactionDate])
+  @@index([mailLogId])
   @@map("transactions")
 }

@@ -38,6 +38,7 @@ export interface NormalizedClientAumRecord {
   navPerUnit?: number;
   brokerArnCode?: string;
   reportDate?: Date;
+  isin?: string;
 }
 
 function resolveAliasKey(rtaType: RtaType): "cams" | "csv" {
@@ -77,6 +78,13 @@ export function mapClientAumRecord(
   const navColumn = rtaType === "KFINTECH" ? headerLookup.get("nav") : undefined;
   const navPerUnit = navColumn !== undefined ? parseRtaNumber(rawRecord[navColumn]) : undefined;
 
+  // ISIN — real column confirmed in KFintech's own MFSD203 CSV export
+  // ("SchemeISIN"). CAMS's WBR4 DBF has no equivalent field (checked the
+  // real field list: FOLIOCHK, SCH_NAME, ... no ISIN-shaped column) — CAMS
+  // folios instead get isin via the WBR39 scheme-master name-join.
+  const isinColumn = rtaType === "KFINTECH" ? headerLookup.get("schemeisin") : undefined;
+  const isin = isinColumn !== undefined ? optionalString(rawRecord[isinColumn]) : undefined;
+
   return {
     amcCode: optionalString(get("amcCode")),
     productCode: optionalString(get("productCode")),
@@ -89,5 +97,6 @@ export function mapClientAumRecord(
     navPerUnit,
     brokerArnCode: optionalString(get("brokerArnCode")),
     reportDate: parseRtaDate(get("reportDate")),
+    isin,
   };
 }

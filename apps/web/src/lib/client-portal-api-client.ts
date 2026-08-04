@@ -27,6 +27,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     const body = await response.json().catch(() => ({ message: response.statusText }));
+    // Same "don't fail silently forever" fix as api-client.ts — an expired
+    // client-portal token should bounce to the client login, not leave the
+    // portal showing a vague load error indefinitely.
+    if (response.status === 401) {
+      clearClientToken();
+      if (typeof window !== "undefined" && window.location.pathname !== "/client-portal/login") {
+        window.location.href = "/client-portal/login";
+      }
+    }
     throw new ApiError(response.status, body.message ?? "Request failed");
   }
 
