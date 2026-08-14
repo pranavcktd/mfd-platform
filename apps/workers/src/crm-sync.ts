@@ -1,5 +1,5 @@
 import { Prisma, prisma } from "@mfd/db";
-import { schemeNameKey } from "@mfd/shared";
+import { schemeNameKey, computeFolioCurrentUnitsFromTransactions, mostRecentTransactionNav } from "@mfd/shared";
 
 /**
  * Fills isin/assetClass/rtaType from a stored SchemeCorrectionRule
@@ -193,7 +193,7 @@ interface InvestorMasterClientFolioParams {
  */
 export async function upsertInvestorMasterClientAndFolio(
   params: InvestorMasterClientFolioParams,
-): Promise<{ clientId: string; folioId: string | null }> {
+): Promise<{ clientId: string | null; folioId: string | null }> {
   const {
     distributorId,
     arnProfileId,
@@ -270,8 +270,20 @@ export async function upsertInvestorMasterClientAndFolio(
     return { clientId: client.id, folioId: folio.id };
   }
 
-  const client = await prisma.client.create({ data: { distributorId, ...clientData } });
-  return { clientId: client.id, folioId: null };
+  // No PAN AND no (amcCode+productCode) to key a Folio on — there is no
+  // reliable identity signal left at all. Real incident (2026-08-09): this
+  // branch used to unconditionally `create` a brand-new Client here with no
+  // dedup check whatsoever — a column-name mismatch on ONE report variant
+  // (WBR9C's real PAN/product-code fields differ from WBR9's; see
+  // investor-master.ts) silently produced 3,758 permanent, folio-less
+  // "ghost" clients platform-wide (86% of the whole roster), each one a
+  // fresh duplicate of a real person with zero way to ever reconcile back.
+  // Skipping entirely is the correct fail-closed behavior: this row's
+  // demographic enrichment is lost for this one call, which is strictly
+  // better than corrupting the client list forever. A future proper fix
+  // (fuzzy name+DOB matching) could recover this data path deliberately;
+  // silently guessing an identity here must never happen again.
+  return { clientId: null, folioId: null };
 }
 
 interface FolioBalanceParams {
@@ -309,6 +321,48 @@ export async function updateFolioBalance(params: FolioBalanceParams): Promise<vo
     where: { id: folioId },
     data: { balanceUnits, valuationAmount, navPerUnit, balanceAsOfDate: asOfDate, lastBalanceMailLogId: mailLogId },
   });
+  // A real balance report has now arrived — the transaction-replay estimate
+  // is no longer needed and would otherwise sit stale beside the real data.
+  await prisma.folio.update({
+    where: { id: folioId },
+    data: { estimatedBalanceUnits: null, estimatedValuationAmount: null },
+  });
+}
+
+/**
+ * Keeps Folio.estimated{BalanceUnits,ValuationAmount} current for a folio
+ * that has never received an RTA balance report (WBR4/CLIENT_AUM/MFSD203)
+ * at all — called after every new transaction batch on that folio, not
+ * just once at backfill time, so a client who only shows up via
+ * transaction feeds (real confirmed case: a lumpsum PURCHASE with no
+ * balance report yet) keeps contributing an up-to-date estimate to AUM
+ * totals as more transactions arrive. No-ops once a real balance report
+ * exists (updateFolioBalance clears these fields the moment one arrives) —
+ * never overwrites real RTA data.
+ */
+export async function refreshEstimatedFolioBalance(folioId: string): Promise<void> {
+  const folio = await prisma.folio.findUniqueOrThrow({
+    where: { id: folioId },
+    select: {
+      balanceUnits: true,
+      transactions: {
+        select: { transactionType: true, amount: true, units: true, isRejection: true, navPerUnit: true },
+        orderBy: [{ transactionDate: "asc" }, { id: "asc" }],
+      },
+    },
+  });
+  if (folio.balanceUnits !== null) {
+    return;
+  }
+  const units = computeFolioCurrentUnitsFromTransactions(folio.transactions);
+  const nav = mostRecentTransactionNav(folio.transactions);
+  await prisma.folio.update({
+    where: { id: folioId },
+    data: {
+      estimatedBalanceUnits: Math.abs(units) > 0.0001 ? units.toFixed(4) : null,
+      estimatedValuationAmount: Math.abs(units) > 0.0001 && nav !== null ? (units * nav).toFixed(2) : null,
+    },
+  });
 }
 
 interface SipRegistrationParams {
@@ -322,16 +376,28 @@ interface SipRegistrationParams {
   registrationDate: Date;
   ceaseDate?: Date;
   isActive: boolean;
+  registrationType?: string;
   idempotencyHash: string;
+  mailLogId?: string;
 }
 
-/** Immutable event record, same pattern as Transaction — upsert by idempotencyHash, never mutate an existing row. */
+/**
+ * Immutable event record, same pattern as Transaction — upsert by
+ * idempotencyHash, never mutate an existing row's own fields. ONE
+ * exception: `registrationType` is re-applied on every upsert, because it
+ * was added to this schema after ~2,386 real rows already existed (Round
+ * 29, 2026-08-11/12) — those rows need a re-import to backfill a field
+ * that didn't exist when they were first created, not a genuine "this
+ * event's own data changed" case. Safe to keep updating indefinitely: for
+ * a real, unchanged registration event, re-deriving registrationType from
+ * the same source row always yields the same value.
+ */
 export async function upsertSipRegistration(params: SipRegistrationParams): Promise<void> {
-  const { idempotencyHash, ...data } = params;
+  const { idempotencyHash, registrationType, ...data } = params;
   await prisma.sipRegistration.upsert({
     where: { idempotencyHash },
-    create: { idempotencyHash, ...data },
-    update: {},
+    create: { idempotencyHash, registrationType, ...data },
+    update: { registrationType },
   });
 }
 
@@ -371,6 +437,124 @@ export async function updateFolioKycStatus(params: FolioKycStatusParams): Promis
       AND folio_number = ${folioNumber}
       AND (kyc_report_date IS NULL OR kyc_report_date <= ${reportDate})
   `;
+}
+
+interface FolioKycStatusByPanParams {
+  distributorId: string;
+  investorPan: string;
+  kycStatus?: string;
+  kycStatusDescription?: string;
+  reportDate?: Date;
+}
+
+/**
+ * KFintech's MFSD262 (PAN Level KYC Report) is scoped to PAN, not folio —
+ * genuinely different granularity from WBR56/MFSD239 (updateFolioKycStatus
+ * above), which are per-folio. Applies the status to every Folio whose
+ * Client shares this PAN, across every AMC/scheme that client holds —
+ * matches MFSD262's own real meaning ("this investor's KYC is valid",
+ * not "this one folio's KYC is valid"). Same newer-date guard as
+ * updateFolioKycStatus, and same PAN-not-found-yet is a no-op (not an
+ * error) — this report can reference PANs before any of their folios have
+ * been ingested from a different report.
+ */
+export async function updateFolioKycStatusByPan(params: FolioKycStatusByPanParams): Promise<void> {
+  const { distributorId, investorPan, kycStatus, kycStatusDescription, reportDate } = params;
+  if (!investorPan || !reportDate) {
+    return;
+  }
+  await prisma.$executeRaw`
+    UPDATE folios f
+    SET kyc_status = ${kycStatus ?? null},
+        kyc_status_description = ${kycStatusDescription ?? null},
+        kyc_report_date = ${reportDate}
+    FROM clients c
+    WHERE f.client_id = c.id
+      AND c.distributor_id = ${distributorId}::uuid
+      AND c.pan_number = ${investorPan}
+      AND (f.kyc_report_date IS NULL OR f.kyc_report_date <= ${reportDate})
+  `;
+}
+
+interface ClientBankAccountFromRtaParams {
+  distributorId: string;
+  arnProfileId?: string;
+  investorPan?: string;
+  folioNumber: string;
+  amcCode?: string;
+  bankName: string;
+  accountNumber?: string;
+  ifscCode?: string;
+  idempotencyHash: string;
+  mailLogId?: string;
+}
+
+/**
+ * Resolves the owning Client purely by PAN (matching how MFSD263 itself is
+ * scoped — one row per investor, not per folio) and only attaches to an
+ * EXISTING client, never creates one — unlike resolveClientAndFolioId, a
+ * bank-account report doesn't carry enough demographic data (no investor
+ * name reliably present) to safely originate a new Client record. A PAN
+ * this system hasn't seen yet from any other report is a real, expected
+ * gap (not an error) — silently skipped.
+ */
+export async function upsertClientBankAccountFromRta(params: ClientBankAccountFromRtaParams): Promise<void> {
+  const { distributorId, arnProfileId, investorPan, folioNumber, bankName, accountNumber, ifscCode, idempotencyHash, mailLogId } = params;
+  if (!investorPan) return;
+  const client = await prisma.client.findUnique({ where: { distributorId_panNumber: { distributorId, panNumber: investorPan } } });
+  if (!client) return;
+
+  await prisma.clientBankAccount.upsert({
+    where: { idempotencyHash },
+    create: {
+      distributorId,
+      arnProfileId,
+      clientId: client.id,
+      bankName,
+      accountNumber: accountNumber ?? "",
+      ifscCode,
+      source: "RTA",
+      folioNumber,
+      idempotencyHash,
+      mailLogId,
+    },
+    update: {},
+  });
+}
+
+interface ClientNomineeFromRtaParams {
+  distributorId: string;
+  arnProfileId?: string;
+  investorPan?: string;
+  folioNumber: string;
+  nomineeName: string;
+  nomineeRelation?: string;
+  idempotencyHash: string;
+  mailLogId?: string;
+}
+
+/** Same PAN-only resolution and existing-client-only rule as upsertClientBankAccountFromRta — see its doc comment. */
+export async function upsertClientNomineeFromRta(params: ClientNomineeFromRtaParams): Promise<void> {
+  const { distributorId, arnProfileId, investorPan, folioNumber, nomineeName, nomineeRelation, idempotencyHash, mailLogId } = params;
+  if (!investorPan) return;
+  const client = await prisma.client.findUnique({ where: { distributorId_panNumber: { distributorId, panNumber: investorPan } } });
+  if (!client) return;
+
+  await prisma.clientNominee.upsert({
+    where: { idempotencyHash },
+    create: {
+      distributorId,
+      arnProfileId,
+      clientId: client.id,
+      nomineeName,
+      relation: nomineeRelation,
+      source: "RTA",
+      folioNumber,
+      idempotencyHash,
+      mailLogId,
+    },
+    update: {},
+  });
 }
 
 /**

@@ -56,3 +56,24 @@ export function gmailSearchLink(messageId: string): string {
   const bare = messageId.replace(/^<|>$/g, "");
   return `https://mail.google.com/mail/u/0/#search/rfc822msgid%3A${encodeURIComponent(bare)}`;
 }
+
+/** The exact same search gmailSearchLink opens, as copy-paste-able plain text — for pasting into an already-open Gmail tab's own search box rather than following a link. */
+export function gmailMessageIdSearchText(messageId: string): string {
+  return `rfc822msgid:${messageId.replace(/^<|>$/g, "")}`;
+}
+
+/** Fallback Gmail search text for a failed mail with no captured Message-ID (rows from before that field existed) — built from whatever the ingestion pipeline still knows, so there's always something to paste and search with instead of nothing. A ±1 day window around receivedAt absorbs timezone rounding between our stored UTC timestamp and the admin's own Gmail account timezone. */
+export function gmailFallbackSearchText(fromAddress: string, subject: string | null, receivedAt: string | null): string {
+  const parts = [`from:${fromAddress}`];
+  if (subject) parts.push(`subject:"${subject}"`);
+  if (receivedAt) {
+    const received = new Date(receivedAt);
+    const after = new Date(received);
+    after.setUTCDate(after.getUTCDate() - 1);
+    const before = new Date(received);
+    before.setUTCDate(before.getUTCDate() + 1);
+    const fmt = (d: Date) => `${d.getUTCFullYear()}/${String(d.getUTCMonth() + 1).padStart(2, "0")}/${String(d.getUTCDate()).padStart(2, "0")}`;
+    parts.push(`after:${fmt(after)}`, `before:${fmt(before)}`);
+  }
+  return parts.join(" ");
+}

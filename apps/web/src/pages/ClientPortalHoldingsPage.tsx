@@ -1,13 +1,16 @@
 import { Card } from "../components/ui/Card";
 import { OtherAssetValue } from "../components/ui/OtherAssetValue";
+import { PageLoading } from "../components/ui/PageLoading";
 import { FolioHoldingsExplorer } from "../components/holdings/FolioHoldingsExplorer";
-import { useClientPortalFolioTransactions, useClientPortalMe } from "../hooks/useClientPortal";
+import { SystematicInvestmentsExplorer } from "../components/holdings/SystematicInvestmentsExplorer";
+import { useClientPortalFolioTransactions, useClientPortalMe, useClientPortalSystematicInvestments } from "../hooks/useClientPortal";
 
 export function ClientPortalHoldingsPage() {
   const { data, isLoading, isError } = useClientPortalMe();
+  const { data: systematicInvestments, isLoading: systematicLoading } = useClientPortalSystematicInvestments();
 
   if (isLoading) {
-    return <p className="text-sm text-ink-secondary">Loading…</p>;
+    return <PageLoading />;
   }
   if (isError || !data) {
     return <p className="text-sm text-status-critical">Could not load your holdings.</p>;
@@ -29,6 +32,8 @@ export function ClientPortalHoldingsPage() {
           useTransactions={(folioId) => useClientPortalFolioTransactions(folioId)}
         />
       </Card>
+
+      <SystematicInvestmentsExplorer registrations={systematicInvestments} isLoading={systematicLoading} />
 
       <Card title="Other Assets">
         <ul className="divide-y divide-[var(--gridline)]">

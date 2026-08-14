@@ -103,11 +103,11 @@ export async function processNavHistoryBackfill(job: Job<NavHistoryBackfillJobDa
     let upserted = 0;
     for (let i = 0; i < rows.length; i += BATCH_SIZE) {
       const batch = rows.slice(i, i + BATCH_SIZE);
-      const values = batch.map((r) => Prisma.sql`(gen_random_uuid(), ${r.isin}::text, ${r.navDate}::date, ${r.nav}::numeric, now())`);
+      const values = batch.map((r) => Prisma.sql`(gen_random_uuid(), ${r.isin}::text, ${r.navDate}::date, ${r.nav}::numeric, now(), ${log.id}::uuid)`);
       const result: unknown[] = await prisma.$queryRaw`
-        INSERT INTO scheme_nav_history (id, isin, nav_date, nav, created_at)
+        INSERT INTO scheme_nav_history (id, isin, nav_date, nav, created_at, nav_sync_log_id)
         VALUES ${Prisma.join(values)}
-        ON CONFLICT (isin, nav_date) DO UPDATE SET nav = EXCLUDED.nav
+        ON CONFLICT (isin, nav_date) DO UPDATE SET nav = EXCLUDED.nav, nav_sync_log_id = EXCLUDED.nav_sync_log_id
         RETURNING id
       `;
       upserted += result.length;

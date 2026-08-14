@@ -97,7 +97,7 @@ function FixPanel({
   onFixed: (result: { appliedFields: CorrectionFields; siblingFolios: SiblingFolio[] }) => void;
 }) {
   const { data: suggestions, isLoading: suggestionsLoading } = useDataQualitySuggestions(
-    gapType === "NO_ISIN" || gapType === "NO_LIVE_NAV_MATCH" ? row.id : null,
+    gapType === "NO_ISIN" || gapType === "NO_LIVE_NAV_MATCH" || gapType === "NO_RTA_TYPE" ? row.id : null,
   );
   const applyFix = useApplyDataQualityFix();
   const [manualIsin, setManualIsin] = useState("");
@@ -156,19 +156,52 @@ function FixPanel({
         )}
 
         {gapType === "NO_RTA_TYPE" && (
-          <div className="flex items-center gap-2">
-            <select value={rtaType} onChange={(e) => setRtaType(e.target.value)} className="rounded-md border border-[var(--border)] bg-surface px-2 py-1 text-xs text-ink">
-              <option value="">Select RTA…</option>
-              <option value="CAMS">CAMS</option>
-              <option value="KFINTECH">KFintech</option>
-            </select>
-            <button
-              onClick={() => apply({ rtaType })}
-              disabled={!rtaType || applyFix.isPending}
-              className="rounded-md bg-series-1 px-2 py-1 text-[11px] font-medium text-white hover:opacity-90 disabled:opacity-50"
-            >
-              Apply
-            </button>
+          <div className="space-y-2">
+            <p className="text-xs font-medium text-ink-secondary">Suggested matches (RTA inferred from the matched scheme)</p>
+            {suggestionsLoading && <p className="text-xs text-ink-muted">Searching known schemes…</p>}
+            {suggestions?.length === 0 && <p className="text-xs text-ink-muted">No close match found — select the RTA manually below.</p>}
+            <div className="space-y-1">
+              {suggestions?.map((s) => {
+                // Same inference rule as the backend (applyCorrection):
+                // a scheme_master row with amc_code "AMFI" only exists
+                // because nav-sync.processor.ts inserted it from AMFI's own
+                // industry-wide file — meaning CAMS's WBR39 report never
+                // had this scheme, so it must be KFintech-serviced.
+                const impliedRta = s.amcCode === "AMFI" ? "KFINTECH" : "CAMS";
+                return (
+                  <div key={s.schemeMasterId} className="flex items-center justify-between gap-3 rounded-md border border-[var(--border)] bg-surface px-3 py-1.5 text-xs">
+                    <div>
+                      <span className="font-medium text-ink">{s.schemeName}</span>
+                      <span className="ml-2 text-ink-muted">
+                        {s.amcName ?? s.amcCode} · ISIN {s.isin} · match {(s.score * 100).toFixed(0)}% · implies{" "}
+                        <span className="font-medium text-ink">{impliedRta === "KFINTECH" ? "KFintech" : "CAMS"}</span>
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => apply({ rtaType: impliedRta, isin: s.isin ?? undefined })}
+                      disabled={applyFix.isPending}
+                      className="shrink-0 rounded-md bg-series-1 px-2 py-1 text-[11px] font-medium text-white hover:opacity-90 disabled:opacity-50"
+                    >
+                      Use this
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="flex items-center gap-2 pt-1">
+              <select value={rtaType} onChange={(e) => setRtaType(e.target.value)} className="rounded-md border border-[var(--border)] bg-surface px-2 py-1 text-xs text-ink">
+                <option value="">Or select RTA manually…</option>
+                <option value="CAMS">CAMS</option>
+                <option value="KFINTECH">KFintech</option>
+              </select>
+              <button
+                onClick={() => apply({ rtaType })}
+                disabled={!rtaType || applyFix.isPending}
+                className="rounded-md border border-[var(--border)] px-2 py-1 text-[11px] font-medium text-ink-secondary hover:bg-[var(--gridline)]/50 disabled:opacity-50"
+              >
+                Apply
+              </button>
+            </div>
           </div>
         )}
 

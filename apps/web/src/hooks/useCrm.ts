@@ -1,5 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "../lib/api-client";
+import type { SystematicInvestmentRegistration as ClientSystematicInvestment } from "../lib/holdings-types";
+export type { ClientSystematicInvestment };
 
 export interface ClientListItem {
   id: string;
@@ -11,6 +13,14 @@ export interface ClientListItem {
   folioCount: number;
   totalAum: string;
   totalInvested: string;
+  /** currentValue - invested, using the same effective-current-value fallback as totalAum. */
+  gain: string;
+  /** Simple (non-annualized) return since inception — null when invested is ~0 (nothing to divide by). */
+  absoluteReturnPercent: string | null;
+  /** Newton-Raphson annualized return over every real cash flow — null when there are fewer than 2 cash flows or it didn't converge. */
+  xirr: string | null;
+  /** Approximate for multi-purchase folios (treats total invested as a lump sum from the first transaction date) — exact only for a genuine single-purchase folio. Prefer xirr for accuracy; this is the familiar "CAGR" label some users expect alongside it. */
+  cagr: string | null;
   needsReview: boolean;
 }
 
@@ -64,6 +74,10 @@ export interface ClientFolio {
   liveNav: string | null;
   liveNavDate: string | null;
   liveValue: string | null;
+  /** Last-resort fallback when there's neither an RTA balance report nor a live AMFI NAV match — units replayed from transaction history. */
+  estimatedBalanceUnits: string | null;
+  /** Estimated units valued at the most recent transaction's own NAV — only populated when valuationAmount and liveValue are both null. */
+  estimatedValuationAmount: string | null;
   activeSips: number;
   source: string;
   transactionCount: number;
@@ -138,6 +152,14 @@ export interface ClientDetail {
   reviewReason: string | null;
   portalEnabled: boolean;
   createdAt: string;
+  /** Same effective-current-value fallback (RTA-confirmed -> live NAV -> transaction-replay estimate) as each folio's own liveValue/estimatedValuationAmount — never derive this again client-side from folios[].valuationAmount alone, that silently drops folios with no RTA balance report yet. */
+  totalCurrentValue: string;
+  totalInvestedValue: string;
+  gain: string;
+  absoluteReturnPercent: string | null;
+  xirr: string | null;
+  /** Approximate for multi-purchase folios — see ClientListItem.cagr's own doc comment. */
+  cagr: string | null;
   folios: ClientFolio[];
   otherAssets: ClientOtherAsset[];
 }
@@ -194,6 +216,14 @@ export function useFolioTransactions(clientId: string | undefined, folioId: stri
     queryKey: ["crm-folio-transactions", clientId, folioId],
     queryFn: () => apiClient.get<FolioTransaction[]>(`/crm/clients/${clientId}/folios/${folioId}/transactions`),
     enabled: Boolean(clientId && folioId),
+  });
+}
+
+export function useClientSystematicInvestments(clientId: string | undefined) {
+  return useQuery({
+    queryKey: ["crm-client-systematic-investments", clientId],
+    queryFn: () => apiClient.get<ClientSystematicInvestment[]>(`/crm/clients/${clientId}/systematic-investments`),
+    enabled: Boolean(clientId),
   });
 }
 

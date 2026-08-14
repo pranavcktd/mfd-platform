@@ -7,6 +7,8 @@ import { CreateDistributorDto } from "./dto/create-distributor.dto";
 import { CreateChildArnProfileDto } from "./dto/create-child-arn-profile.dto";
 import { logAdminAction } from "./audit-log";
 import { sendOnboardingEmail } from "./onboarding-email";
+import { ArnProfilesService } from "../arn-profiles/arn-profiles.service";
+import { SaveCredentialDto } from "../arn-profiles/dto/save-credential.dto";
 
 const BCRYPT_ROUNDS = 12;
 /** Fixed default for every newly-onboarded MFD — not a secret (the MFD is expected to change it on first login), so returning it in the onboarding response is fine. */
@@ -14,6 +16,8 @@ const DEFAULT_ONBOARDING_PASSWORD = "Admin@123";
 
 @Injectable()
 export class AdminService {
+  constructor(private readonly arnProfilesService: ArnProfilesService) {}
+
   /**
    * Login email is the parent ARN's registered CAMS mail id, not a
    * separately-supplied address — per the actual onboarding workflow, the
@@ -193,9 +197,10 @@ export class AdminService {
     return { newPassword: DEFAULT_ONBOARDING_PASSWORD };
   }
 
-  /** Full MFD roster for the super-admin panel — one row per distributor with aggregate stats, not per-ARN. */
+  /** Full MFD roster for the super-admin panel — one row per distributor with aggregate stats, not per-ARN. Excludes soft-deleted MFDs by default (see softDeleteDistributor). */
   async listDistributors() {
     const distributors = await prisma.distributor.findMany({
+      where: { deletedAt: null },
       orderBy: { createdAt: "desc" },
       include: {
         arnProfiles: { select: { id: true, arnNumber: true, arnHolderName: true, parentArnProfileId: true, camsMailId: true } },
@@ -233,6 +238,41 @@ export class AdminService {
     });
     await logAdminAction(isActive ? "ENABLE_DISTRIBUTOR" : "DISABLE_DISTRIBUTOR", distributorId);
     return distributor;
+  }
+
+  /**
+   * Soft delete only — no cascading hard-delete exists anywhere in this
+   * schema (see Distributor.deletedAt's doc comment). Hides the MFD from
+   * listDistributors and blocks login (isActive false), but every client/
+   * folio/transaction/etc row stays intact and recoverable by clearing
+   * deletedAt directly.
+   */
+  async softDeleteDistributor(distributorId: string) {
+    const distributor = await prisma.distributor.update({
+      where: { id: distributorId },
+      data: { deletedAt: new Date(), isActive: false },
+      select: { id: true, name: true },
+    });
+    await logAdminAction("DELETE_DISTRIBUTOR", distributorId, { name: distributor.name });
+    return distributor;
+  }
+
+  /** What zip password/portal login is currently live for an ARN's CAMS/KFintech decryption — see ArnProfilesService.getCredentials for the "why decrypt for viewing" rationale. */
+  async getArnCredentials(distributorId: string, arnProfileId: string) {
+    return this.arnProfilesService.getCredentials(distributorId, arnProfileId);
+  }
+
+  /**
+   * Lets a super admin update an MFD's RTA zip password on their behalf
+   * (e.g. CAMS/KFintech reissues one and the MFD reports it) without
+   * needing the MFD to log in themselves. Same insert-new-row-never-
+   * overwrite behavior as the distributor's own self-service endpoint —
+   * just callable by an admin, targeting any distributor's ARN profile.
+   */
+  async saveArnCredential(distributorId: string, arnProfileId: string, dto: SaveCredentialDto) {
+    const saved = await this.arnProfilesService.saveCredential(distributorId, arnProfileId, dto);
+    await logAdminAction("UPDATE_ARN_CREDENTIAL", distributorId, { arnProfileId, provider: dto.provider });
+    return saved;
   }
 
   async listAuditLog(distributorId?: string) {

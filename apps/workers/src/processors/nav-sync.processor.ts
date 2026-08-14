@@ -128,13 +128,15 @@ export async function processNavSync(_job: Job<NavSyncJobData>) {
       // Also append today's NAV onto the real dated time series (previously
       // only ever populated by the one-off Jan 31, 2018 grandfathering
       // backfill) — this is what unlocks day-over-day "day change" figures
-      // once at least two days have accumulated; ON CONFLICT DO NOTHING
-      // since a same-day re-run must never overwrite an already-recorded row.
+      // once at least two days have accumulated. ON CONFLICT re-attributes
+      // nav_sync_log_id (and refreshes nav) to whichever run most recently
+      // confirmed this ISIN/date, so the NAV Sync page's per-run "View"
+      // button always reflects the truth of that specific execution.
       await prisma.$executeRaw`
-        INSERT INTO scheme_nav_history (id, isin, nav_date, nav, created_at)
-        SELECT gen_random_uuid(), v.isin, v.nav_date, v.nav, now()
+        INSERT INTO scheme_nav_history (id, isin, nav_date, nav, created_at, nav_sync_log_id)
+        SELECT gen_random_uuid(), v.isin, v.nav_date, v.nav, now(), ${log.id}::uuid
         FROM (VALUES ${Prisma.join(updateValues)}) AS v(isin, nav, nav_date)
-        ON CONFLICT (isin, nav_date) DO NOTHING
+        ON CONFLICT (isin, nav_date) DO UPDATE SET nav = EXCLUDED.nav, nav_sync_log_id = EXCLUDED.nav_sync_log_id
       `;
 
       // amc_name uses the same scheme-name-prefix heuristic already trusted

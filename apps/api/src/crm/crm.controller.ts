@@ -34,6 +34,11 @@ export class CrmController {
     return this.crmService.getFolioTransactions(clientId, folioId);
   }
 
+  @Get("clients/:clientId/systematic-investments")
+  getClientSystematicInvestments(@Param("clientId") clientId: string) {
+    return this.crmService.getClientSystematicInvestments(clientId);
+  }
+
   @Get("clients/:clientId/transactions")
   getClientTransactions(
     @Param("clientId") clientId: string,

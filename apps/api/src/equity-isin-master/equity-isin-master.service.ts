@@ -5,6 +5,8 @@ import { Prisma, prisma } from "@mfd/db";
 import { mergeEquityLists, type MergedEquityRow } from "./equity-isin-merge";
 
 const BATCH_SIZE = 500;
+const LOG_PAGE_SIZE = 50;
+const DATA_PAGE_SIZE = 50;
 
 @Injectable()
 export class EquityIsinMasterService {
@@ -14,7 +16,11 @@ export class EquityIsinMasterService {
    * with a new date-stamped filename still works without a code change),
    * merges them on ISIN, and bulk-upserts into the global
    * EquityIsinMaster — re-runnable any time the exchanges' lists are
-   * refreshed, not a one-shot seed.
+   * refreshed, not a one-shot seed. Every run is logged to
+   * EquityIsinImportLog (RUNNING -> COMPLETED/FAILED), same pattern as
+   * NavSyncLog/MailIngestionLog — there was no history of past imports at
+   * all before this, only the most recent result shown transiently in the
+   * UI and lost on refresh.
    */
   async importFromFolder(folderPath: string) {
     let entries;
@@ -37,19 +43,80 @@ export class EquityIsinMasterService {
       readFile(join(folderPath, bseFile.name), "utf8"),
     ]);
 
-    const merged = mergeEquityLists(nseCsvText, bseCsvText);
-    const upserted = await this.bulkUpsert(merged);
+    return this.runImport(nseCsvText, nseFile.name, bseCsvText, bseFile.name, folderPath);
+  }
 
-    return {
-      nseFile: nseFile.name,
-      bseFile: bseFile.name,
-      totalIsins: merged.length,
-      nseOnly: merged.filter((r) => r.isTradedOnNse && !r.isTradedOnBse).length,
-      bseOnly: merged.filter((r) => !r.isTradedOnNse && r.isTradedOnBse).length,
-      tradedOnBoth: merged.filter((r) => r.isTradedOnNse && r.isTradedOnBse).length,
-      withPriceData: merged.filter((r) => r.lastClosePrice !== null).length,
-      upserted,
-    };
+  /** Same merge/upsert as importFromFolder, just sourced from two directly-uploaded files instead of a server folder path — for admins who don't have (or don't want to expose) a server filesystem path. Both files parse as plain CSV text, same as the folder path, so no binary-format risk from accepting an upload here. */
+  async importFromUpload(nseBuffer: Buffer, nseFilename: string, bseBuffer: Buffer, bseFilename: string) {
+    return this.runImport(nseBuffer.toString("utf8"), nseFilename, bseBuffer.toString("utf8"), bseFilename, "(uploaded)");
+  }
+
+  private async runImport(nseCsvText: string, nseFileName: string, bseCsvText: string, bseFileName: string, folderPath: string) {
+    const log = await prisma.equityIsinImportLog.create({ data: { status: "RUNNING", folderPath } });
+    try {
+      const merged = mergeEquityLists(nseCsvText, bseCsvText);
+      const upserted = await this.bulkUpsert(merged);
+
+      const result = {
+        nseFile: nseFileName,
+        bseFile: bseFileName,
+        totalIsins: merged.length,
+        nseOnly: merged.filter((r) => r.isTradedOnNse && !r.isTradedOnBse).length,
+        bseOnly: merged.filter((r) => !r.isTradedOnNse && r.isTradedOnBse).length,
+        tradedOnBoth: merged.filter((r) => r.isTradedOnNse && r.isTradedOnBse).length,
+        withPriceData: merged.filter((r) => r.lastClosePrice !== null).length,
+        upserted,
+      };
+
+      await prisma.equityIsinImportLog.update({
+        where: { id: log.id },
+        data: { status: "COMPLETED", completedAt: new Date(), ...result },
+      });
+      return result;
+    } catch (err) {
+      await prisma.equityIsinImportLog.update({
+        where: { id: log.id },
+        data: { status: "FAILED", completedAt: new Date(), errorMessage: err instanceof Error ? err.message : String(err) },
+      });
+      throw err;
+    }
+  }
+
+  async listLogs(page = 1) {
+    const [total, logs] = await Promise.all([
+      prisma.equityIsinImportLog.count(),
+      prisma.equityIsinImportLog.findMany({
+        orderBy: { triggeredAt: "desc" },
+        skip: (page - 1) * LOG_PAGE_SIZE,
+        take: LOG_PAGE_SIZE,
+      }),
+    ]);
+    return { total, page, pageSize: LOG_PAGE_SIZE, logs };
+  }
+
+  /** Paginated browse of the master itself, with the same multi-field search `search()` uses — the "view the actual data, not just the last import summary" gap. */
+  async listData(page = 1, query?: string) {
+    const q = query?.trim();
+    const where: Prisma.EquityIsinMasterWhereInput = q
+      ? {
+          OR: [
+            { companyName: { contains: q, mode: "insensitive" } },
+            { nseSymbol: { contains: q, mode: "insensitive" } },
+            { bseScripCode: { contains: q, mode: "insensitive" } },
+            { isin: { contains: q, mode: "insensitive" } },
+          ],
+        }
+      : {};
+    const [total, rows] = await Promise.all([
+      prisma.equityIsinMaster.count({ where }),
+      prisma.equityIsinMaster.findMany({
+        where,
+        orderBy: { companyName: "asc" },
+        skip: (page - 1) * DATA_PAGE_SIZE,
+        take: DATA_PAGE_SIZE,
+      }),
+    ]);
+    return { total, page, pageSize: DATA_PAGE_SIZE, rows };
   }
 
   /** Raw multi-row INSERT ... ON CONFLICT (isin) DO UPDATE, batched — a real bulk upsert, since Prisma has no native "upsert many" and 4,900+ sequential upserts would be far too slow. */

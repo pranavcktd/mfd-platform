@@ -166,6 +166,19 @@ export function mapMfsd201Record(
   const transactionDescription = optionalString(get("transactionDescription"));
   const resolvedType = resolveTransactionType(transactionTypeCode, transactionDescription);
 
+  const units = parseRtaNumber(get("units"));
+  const amount = parseRtaNumber(get("amount"));
+  const rawNavPerUnit = parseRtaNumber(get("navPerUnit"));
+  // Real data confirmed this is common, not an edge case: ~73% of real
+  // PURCHASE/SWITCH_IN rows across both RTAs carry no NAV value at all in
+  // their own NAV/TD_NAV/Nav column, despite having both units and amount
+  // (e.g. a real "Fresh Purchase Systematic" row: amount=249987.5,
+  // units=968.149, NAV column blank). amount/units is the exact NAV for
+  // that row — not an estimate — since units = amount / nav is definitionally
+  // how a purchase is booked, so this is only a fallback for when the RTA's
+  // own column is empty, never a value that overrides a real reported one.
+  const navPerUnit = rawNavPerUnit ?? (units && amount && units !== 0 ? amount / units : undefined);
+
   return {
     amcCode: requireString(get("amcCode"), "amcCode", reportCode),
     productCode: requireString(get("productCode"), "productCode", reportCode),
@@ -183,9 +196,9 @@ export function mapMfsd201Record(
       throw new Error(`Missing required ${reportCode} field: postDate`);
     })(),
     tradeDate: parseRtaDate(get("tradeDate")),
-    units: parseRtaNumber(get("units")),
-    amount: parseRtaNumber(get("amount")),
-    navPerUnit: parseRtaNumber(get("navPerUnit")),
+    units,
+    amount,
+    navPerUnit,
     brokeragePercent: parseRtaNumber(get("brokeragePercent")),
     brokerageAmount: parseRtaNumber(get("brokerageAmount")),
     assetClass: optionalString(get("assetClass")),

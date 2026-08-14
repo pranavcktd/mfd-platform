@@ -70,13 +70,17 @@ export function CrmPage() {
               <th className="px-4 py-2 font-medium">Folios</th>
               <th className="px-4 py-2 text-right font-medium">Invested</th>
               <th className="px-4 py-2 text-right font-medium">Total AUM</th>
+              <th className="px-4 py-2 text-right font-medium">Gain</th>
+              <th className="px-4 py-2 text-right font-medium">Return %</th>
+              <th className="px-4 py-2 text-right font-medium">XIRR</th>
+              <th className="px-4 py-2 text-right font-medium" title="Approximate for multi-purchase folios — treats total invested as a lump sum from the first purchase date. Prefer XIRR for accuracy.">CAGR</th>
               <th className="px-4 py-2 font-medium">Onboarded</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-[var(--gridline)]">
             {!isLoading && data?.clients.length === 0 && (
               <tr>
-                <td colSpan={8} className="px-4 py-6 text-center text-ink-muted">
+                <td colSpan={12} className="px-4 py-6 text-center text-ink-muted">
                   No clients found.
                 </td>
               </tr>
@@ -99,6 +103,18 @@ export function CrmPage() {
                 <td className="px-4 py-2 text-ink-secondary">{c.folioCount}</td>
                 <td className="px-4 py-2 text-right tabular-nums text-ink-secondary"><Amount value={c.totalInvested} /></td>
                 <td className="px-4 py-2 text-right tabular-nums text-ink"><Amount value={c.totalAum} /></td>
+                <td className={`px-4 py-2 text-right tabular-nums ${Number(c.gain) >= 0 ? "text-status-good" : "text-status-critical"}`}>
+                  {Number(c.gain) >= 0 ? "+" : ""}<Amount value={c.gain} />
+                </td>
+                <td className={`px-4 py-2 text-right tabular-nums ${c.absoluteReturnPercent === null ? "text-ink-muted" : Number(c.absoluteReturnPercent) >= 0 ? "text-status-good" : "text-status-critical"}`}>
+                  {c.absoluteReturnPercent !== null ? `${Number(c.absoluteReturnPercent) >= 0 ? "+" : ""}${Number(c.absoluteReturnPercent).toFixed(2)}%` : "—"}
+                </td>
+                <td className={`px-4 py-2 text-right tabular-nums ${c.xirr === null ? "text-ink-muted" : Number(c.xirr) >= 0 ? "text-status-good" : "text-status-critical"}`}>
+                  {c.xirr !== null ? `${Number(c.xirr) >= 0 ? "+" : ""}${Number(c.xirr).toFixed(2)}%` : "—"}
+                </td>
+                <td className={`px-4 py-2 text-right tabular-nums ${c.cagr === null ? "text-ink-muted" : Number(c.cagr) >= 0 ? "text-status-good" : "text-status-critical"}`}>
+                  {c.cagr !== null ? `${Number(c.cagr) >= 0 ? "+" : ""}${Number(c.cagr).toFixed(2)}%` : "—"}
+                </td>
                 <td className="px-4 py-2 text-ink-muted">{formatDate(c.createdAt)}</td>
               </tr>
             ))}

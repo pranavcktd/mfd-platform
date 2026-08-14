@@ -3,6 +3,7 @@ import { ImapFlow } from "imapflow";
 import { simpleParser } from "mailparser";
 import { prisma } from "@mfd/db";
 import { identifyRtaSender, extractDownloadLink } from "../mail-link-extraction";
+import { loadRtaSenderDomains } from "../rta-sender-config";
 import { archiveDecryptionQueue } from "../queues/queue-producers";
 
 export type MailIngestionJobData = Record<string, never>;
@@ -55,6 +56,7 @@ async function matchRecipientToDistributor(
  */
 export async function processMailIngestion(_job: Job<MailIngestionJobData>) {
   const { user, pass } = requireImapConfig();
+  const senderDomains = await loadRtaSenderDomains();
   const client = new ImapFlow({
     host: "imap.gmail.com",
     port: 993,
@@ -103,7 +105,7 @@ export async function processMailIngestion(_job: Job<MailIngestionJobData>) {
       }> = [];
       for await (const message of client.fetch({ seen: false }, { envelope: true, uid: true })) {
         const fromAddress = message.envelope?.from?.[0]?.address ?? "";
-        const rta = identifyRtaSender(fromAddress);
+        const rta = identifyRtaSender(fromAddress, senderDomains);
         if (!rta) {
           skipped++;
           continue;

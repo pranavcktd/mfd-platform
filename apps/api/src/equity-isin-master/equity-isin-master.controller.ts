@@ -1,4 +1,5 @@
-import { Body, Controller, Get, Post, Query, UseGuards } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Get, Post, Query, UploadedFiles, UseGuards, UseInterceptors } from "@nestjs/common";
+import { FileFieldsInterceptor } from "@nestjs/platform-express";
 import { EquityIsinMasterService } from "./equity-isin-master.service";
 import { AdminGuard } from "../admin/admin.guard";
 import { ImportEquityIsinMasterDto } from "./dto/import-equity-isin-master.dto";
@@ -23,5 +24,26 @@ export class EquityIsinMasterAdminController {
   @Post("import")
   importFromFolder(@Body() dto: ImportEquityIsinMasterDto) {
     return this.equityIsinMasterService.importFromFolder(dto.folderPath);
+  }
+
+  @Post("upload")
+  @UseInterceptors(FileFieldsInterceptor([{ name: "nseFile", maxCount: 1 }, { name: "bseFile", maxCount: 1 }]))
+  importFromUpload(@UploadedFiles() files: { nseFile?: Express.Multer.File[]; bseFile?: Express.Multer.File[] }) {
+    const nse = files.nseFile?.[0];
+    const bse = files.bseFile?.[0];
+    if (!nse || !bse) {
+      throw new BadRequestException("Both an NSE file and a BSE file are required");
+    }
+    return this.equityIsinMasterService.importFromUpload(nse.buffer, nse.originalname, bse.buffer, bse.originalname);
+  }
+
+  @Get("logs")
+  listLogs(@Query("page") page?: string) {
+    return this.equityIsinMasterService.listLogs(page ? Number(page) : 1);
+  }
+
+  @Get("data")
+  listData(@Query("page") page?: string, @Query("search") search?: string) {
+    return this.equityIsinMasterService.listData(page ? Number(page) : 1, search);
   }
 }

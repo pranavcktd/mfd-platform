@@ -3,12 +3,16 @@ import { Link } from "react-router-dom";
 import { RefreshCw, Pause, Play } from "lucide-react";
 import {
   useCheckNow,
+  useDeleteDistributor,
   useDistributorList,
   useResetDistributorPassword,
   useScheduleStatus,
   useSetDistributorActive,
   useSetSchedulePaused,
+  type DistributorSummary,
 } from "../hooks/useSuperAdmin";
+import { ConfirmModal } from "../components/ui/ConfirmModal";
+import { ArnCredentialsModal } from "../components/admin/ArnCredentialsModal";
 import { formatCount, formatDateTime } from "../lib/format";
 
 export function SuperAdminMfdListPage() {
@@ -18,7 +22,11 @@ export function SuperAdminMfdListPage() {
   const setSchedulePaused = useSetSchedulePaused();
   const setActive = useSetDistributorActive();
   const resetPassword = useResetDistributorPassword();
+  const deleteDistributor = useDeleteDistributor();
   const [resetResult, setResetResult] = useState<{ name: string; newPassword: string } | null>(null);
+  const [confirmResetId, setConfirmResetId] = useState<{ id: string; name: string } | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<{ id: string; name: string } | null>(null);
+  const [credentialsFor, setCredentialsFor] = useState<DistributorSummary | null>(null);
 
   return (
     <div className="space-y-4">
@@ -137,14 +145,24 @@ export function SuperAdminMfdListPage() {
                       {d.isActive ? "Disable" : "Enable"}
                     </button>
                     <button
-                      onClick={async () => {
-                        const result = await resetPassword.mutateAsync(d.id);
-                        setResetResult({ name: d.name, newPassword: result.newPassword });
-                      }}
+                      onClick={() => setCredentialsFor(d)}
+                      className="text-xs text-ink-secondary hover:underline"
+                    >
+                      Credentials
+                    </button>
+                    <button
+                      onClick={() => setConfirmResetId({ id: d.id, name: d.name })}
                       disabled={resetPassword.isPending}
                       className="text-xs text-ink-secondary hover:underline"
                     >
                       Reset Password
+                    </button>
+                    <button
+                      onClick={() => setConfirmDeleteId({ id: d.id, name: d.name })}
+                      disabled={deleteDistributor.isPending}
+                      className="text-xs text-status-critical hover:underline"
+                    >
+                      Delete
                     </button>
                   </div>
                 </td>
@@ -153,6 +171,46 @@ export function SuperAdminMfdListPage() {
           </tbody>
         </table>
       </div>
+
+      {confirmResetId && (
+        <ConfirmModal
+          title="Reset password?"
+          message={`This immediately replaces ${confirmResetId.name}'s current password with a new temporary one. They'll need to change it on next login.`}
+          confirmLabel="Reset Password"
+          destructive={false}
+          isPending={resetPassword.isPending}
+          onCancel={() => setConfirmResetId(null)}
+          onConfirm={async () => {
+            const result = await resetPassword.mutateAsync(confirmResetId.id);
+            setResetResult({ name: confirmResetId.name, newPassword: result.newPassword });
+            setConfirmResetId(null);
+          }}
+        />
+      )}
+
+      {confirmDeleteId && (
+        <ConfirmModal
+          title="Delete this MFD?"
+          message={`This hides ${confirmDeleteId.name} from the roster and blocks their login immediately. Their clients, folios, and transactions are NOT erased — this can be reversed by a database administrator if needed.`}
+          confirmLabel="Delete"
+          destructive
+          isPending={deleteDistributor.isPending}
+          onCancel={() => setConfirmDeleteId(null)}
+          onConfirm={async () => {
+            await deleteDistributor.mutateAsync(confirmDeleteId.id);
+            setConfirmDeleteId(null);
+          }}
+        />
+      )}
+
+      {credentialsFor && (
+        <ArnCredentialsModal
+          distributorId={credentialsFor.id}
+          distributorName={credentialsFor.name}
+          arnProfiles={credentialsFor.arnProfiles}
+          onClose={() => setCredentialsFor(null)}
+        />
+      )}
     </div>
   );
 }

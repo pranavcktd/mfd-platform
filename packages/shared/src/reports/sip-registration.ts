@@ -22,7 +22,35 @@ const SIP_REGISTRATION_ALIASES = {
   registrationDate: { cams: "REG_DATE", csv: "RegistrationDate" },
   ceaseDate: { cams: "CEASE_DATE", csv: "TerminateDate" },
   brokerArnCode: { cams: "SUB_ARN_CO", csv: "AgentCode" },
+  /// CAMS's raw code, KFintech's own plain-English label — see
+  /// normalizeRegistrationType for how each maps to SIP/STP/SWP.
+  transactionType: { cams: "AUT_TRNTYP", csv: "Trtype" },
 } as const;
+
+/// CAMS's WBR49 AUT_TRNTYP codes, confirmed 2026-08-11 against two real
+/// decrypted archives (ARN-181020, ARN-91053): "P" (Purchase, bank-funded,
+/// no target scheme) is the plain SIP; "SO" and "DTP" both carry a populated
+/// TARGET_SCH (money auto-switches into another scheme) and are STP; "R"
+/// (redemption, no target scheme, no bank) is SWP. KFintech's MFSD243
+/// Trtype column already spells out "SIP"/"STP"/"SWP" directly, so those
+/// pass through unchanged. Any other/unrecognized code returns undefined
+/// rather than guessing — shows up as "unclassified" downstream instead of
+/// silently mislabeling a registration type nobody's confirmed yet.
+const CAMS_TRANSACTION_TYPE_CODES: Record<string, "SIP" | "STP" | "SWP"> = {
+  P: "SIP",
+  SO: "STP",
+  DTP: "STP",
+  R: "SWP",
+};
+
+function normalizeRegistrationType(rawCode: string | undefined, rtaType: RtaType): "SIP" | "STP" | "SWP" | undefined {
+  if (!rawCode) return undefined;
+  const code = rawCode.trim().toUpperCase();
+  if (rtaType === "KFINTECH") {
+    return code === "SIP" || code === "STP" || code === "SWP" ? code : undefined;
+  }
+  return CAMS_TRANSACTION_TYPE_CODES[code];
+}
 
 type SipRegistrationField = keyof typeof SIP_REGISTRATION_ALIASES;
 
@@ -41,6 +69,7 @@ export interface NormalizedSipRegistrationRecord {
   ceaseDate?: Date;
   isActive: boolean;
   brokerArnCode?: string;
+  registrationType?: "SIP" | "STP" | "SWP";
 }
 
 function resolveAliasKey(rtaType: RtaType): "cams" | "csv" {
@@ -93,5 +122,6 @@ export function mapSipRegistrationRecord(
     ceaseDate,
     isActive: ceaseDate === undefined,
     brokerArnCode: optionalString(get("brokerArnCode")),
+    registrationType: normalizeRegistrationType(optionalString(get("transactionType")), rtaType),
   };
 }

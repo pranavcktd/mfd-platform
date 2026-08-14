@@ -165,6 +165,21 @@ export class ReportsController {
     return this.reportsService.getSipDueReport(withinDays ? Number(withinDays) : 7, parseArnIds(arnProfileIds));
   }
 
+  @Get("distributor/sip-breakdown")
+  getSipBreakdown(@Query("arnProfileIds") arnProfileIds?: string) {
+    return this.reportsService.getSipBreakdown(parseArnIds(arnProfileIds));
+  }
+
+  @Get("distributor/registration-type-breakdown")
+  getRegistrationTypeBreakdown(@Query("arnProfileIds") arnProfileIds?: string) {
+    return this.reportsService.getRegistrationTypeBreakdown(parseArnIds(arnProfileIds));
+  }
+
+  @Get("distributor/sip-explorer")
+  getSipExplorer(@Query("arnProfileIds") arnProfileIds?: string) {
+    return this.reportsService.getSipExplorer(parseArnIds(arnProfileIds));
+  }
+
   @Get("distributor/sip-expiring")
   getSipExpiring(@Query("withinDays") withinDays?: string, @Query("arnProfileIds") arnProfileIds?: string) {
     return this.reportsService.getSipExpiringReport(withinDays ? Number(withinDays) : 30, parseArnIds(arnProfileIds));
@@ -189,13 +204,21 @@ export class ReportsController {
   }
 
   @Get("distributor/stp")
-  getStp(@Query("page") page?: string, @Query("arnProfileIds") arnProfileIds?: string) {
-    return this.reportsService.getStpReport(page ? Number(page) : 1, parseArnIds(arnProfileIds));
+  getStp(
+    @Query("status") status?: "new" | "active" | "ceased",
+    @Query("page") page?: string,
+    @Query("arnProfileIds") arnProfileIds?: string,
+  ) {
+    return this.reportsService.getStpReport(status, page ? Number(page) : 1, parseArnIds(arnProfileIds));
   }
 
   @Get("distributor/swp")
-  getSwp(@Query("page") page?: string, @Query("arnProfileIds") arnProfileIds?: string) {
-    return this.reportsService.getSwpReport(page ? Number(page) : 1, parseArnIds(arnProfileIds));
+  getSwp(
+    @Query("status") status?: "new" | "active" | "ceased",
+    @Query("page") page?: string,
+    @Query("arnProfileIds") arnProfileIds?: string,
+  ) {
+    return this.reportsService.getSwpReport(status, page ? Number(page) : 1, parseArnIds(arnProfileIds));
   }
 
   @Get("distributor/transaction-summary")

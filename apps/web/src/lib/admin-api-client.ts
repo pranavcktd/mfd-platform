@@ -14,12 +14,14 @@ export function clearAdminKey(): void {
   localStorage.removeItem(ADMIN_KEY_STORAGE_KEY);
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function request<T>(path: string, init?: RequestInit, isFormData = false): Promise<T> {
   const key = getAdminKey();
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
     headers: {
-      "Content-Type": "application/json",
+      // FormData needs the browser to set its own multipart boundary —
+      // forcing application/json here would corrupt the upload.
+      ...(isFormData ? {} : { "Content-Type": "application/json" }),
       ...(key ? { "x-admin-key": key } : {}),
       ...init?.headers,
     },
@@ -49,6 +51,10 @@ export const adminApiClient = {
   get: <T>(path: string) => request<T>(path),
   post: <T>(path: string, body?: unknown) =>
     request<T>(path, { method: "POST", body: body ? JSON.stringify(body) : undefined }),
+  postForm: <T>(path: string, formData: FormData) => request<T>(path, { method: "POST", body: formData }, true),
+  put: <T>(path: string, body?: unknown) =>
+    request<T>(path, { method: "PUT", body: body ? JSON.stringify(body) : undefined }),
   patch: <T>(path: string, body?: unknown) =>
     request<T>(path, { method: "PATCH", body: body ? JSON.stringify(body) : undefined }),
+  delete: <T>(path: string) => request<T>(path, { method: "DELETE" }),
 };

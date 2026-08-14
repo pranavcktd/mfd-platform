@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from "@nestjs/common";
 import { parse } from "csv-parse/sync";
 import { AdminGuard } from "./admin.guard";
 import { AdminService } from "./admin.service";
@@ -6,6 +6,7 @@ import { CreateDistributorDto } from "./dto/create-distributor.dto";
 import { CreateChildArnProfileDto } from "./dto/create-child-arn-profile.dto";
 import { SetActiveDto } from "./dto/set-active.dto";
 import { BulkOnboardDto } from "./dto/bulk-onboard.dto";
+import { SaveCredentialDto } from "../arn-profiles/dto/save-credential.dto";
 
 @UseGuards(AdminGuard)
 @Controller("admin/distributors")
@@ -50,8 +51,27 @@ export class AdminController {
     return this.adminService.resetPassword(distributorId);
   }
 
+  @Get(":distributorId/arn-profiles/:arnProfileId/credentials")
+  getArnCredentials(@Param("distributorId") distributorId: string, @Param("arnProfileId") arnProfileId: string) {
+    return this.adminService.getArnCredentials(distributorId, arnProfileId);
+  }
+
+  @Post(":distributorId/arn-profiles/:arnProfileId/credentials")
+  saveArnCredential(
+    @Param("distributorId") distributorId: string,
+    @Param("arnProfileId") arnProfileId: string,
+    @Body() dto: SaveCredentialDto,
+  ) {
+    return this.adminService.saveArnCredential(distributorId, arnProfileId, dto);
+  }
+
   @Patch(":distributorId/status")
   setActive(@Param("distributorId") distributorId: string, @Body() dto: SetActiveDto) {
     return this.adminService.setActive(distributorId, dto.isActive);
+  }
+
+  @Delete(":distributorId")
+  softDelete(@Param("distributorId") distributorId: string) {
+    return this.adminService.softDeleteDistributor(distributorId);
   }
 }

@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { ChevronDown, ChevronRight, AlertTriangle, Mail } from "lucide-react";
 import { Amount } from "../ui/Amount";
+import { GainLossStat } from "../ui/GainLossStat";
 import { formatDate } from "../../lib/format";
-import { isNonZeroHolding, type HoldingFolio, type HoldingTransaction, type SourceMailInfo } from "../../lib/holdings-types";
+import { isNonZeroHolding, effectiveCurrentValue, type HoldingFolio, type HoldingTransaction, type SourceMailInfo } from "../../lib/holdings-types";
 
 function SourceBadge({ source }: { source: string }) {
   if (source === "RTA_MAILBACK") return null;
@@ -10,6 +11,29 @@ function SourceBadge({ source }: { source: string }) {
     <span className="ml-2 rounded bg-series-4/15 px-1.5 py-0.5 text-[10px] font-medium text-series-4">
       External ({source === "CAS_IMPORT" ? "CAS import" : source})
     </span>
+  );
+}
+
+const REGISTRATION_TYPE_BADGE_CLASSES: Record<string, string> = {
+  SIP: "bg-series-1/15 text-series-1",
+  STP: "bg-series-2/15 text-series-2",
+  SWP: "bg-series-3/15 text-series-3",
+};
+
+/** Real active SIP/STP/SWP mandates on this folio (WBR49/MFSD243 registration data, not a transaction guess) — a folio can carry more than one, e.g. fed by a SIP and drained by an SWP at the same time. */
+function RegistrationTypeBadges({ types }: { types: string[] | undefined }) {
+  if (!types || types.length === 0) return null;
+  return (
+    <>
+      {types.map((type) => (
+        <span
+          key={type}
+          className={`ml-2 rounded px-1.5 py-0.5 text-[10px] font-medium ${REGISTRATION_TYPE_BADGE_CLASSES[type] ?? "bg-[var(--gridline)] text-ink-secondary"}`}
+        >
+          {type}
+        </span>
+      ))}
+    </>
   );
 }
 
@@ -114,15 +138,28 @@ function FolioRow({
             <p className="truncate text-ink">
               {folio.schemeName ?? `${folio.amcCode}/${folio.schemeCode}`}
               <SourceBadge source={folio.source} />
+              <RegistrationTypeBadges types={folio.activeRegistrationTypes} />
             </p>
             <p className="inline-flex items-center gap-1 text-xs text-ink-muted">
-              {folio.folioNumber} · {folio.assetClass ?? "—"} · {folio.balanceUnits ?? "0"} units
+              {folio.folioNumber} · {folio.assetClass ?? "—"}
               {folio.balanceAsOfDate ? ` · as of ${formatDate(folio.balanceAsOfDate)}` : ""}
               <SourceMailIcon mail={folio.balanceSourceMail} />
             </p>
           </div>
         </div>
         <div className="flex shrink-0 gap-4 text-right text-xs">
+          <div
+            title={
+              folio.balanceUnits === null && folio.estimatedBalanceUnits
+                ? "No RTA balance report yet — replayed from transaction history"
+                : undefined
+            }
+          >
+            <p className="text-ink-muted">Units</p>
+            <p className="tabular-nums font-medium text-ink">
+              {folio.balanceUnits === null && folio.estimatedBalanceUnits ? `~${folio.estimatedBalanceUnits}` : (folio.balanceUnits ?? "0")}
+            </p>
+          </div>
           <div>
             <p className="text-ink-muted">Invested</p>
             <Amount value={folio.investedAmount} className="tabular-nums text-ink-secondary" />
@@ -137,6 +174,16 @@ function FolioRow({
               <Amount value={folio.liveValue} className="tabular-nums font-medium text-series-6" />
             </div>
           )}
+          {folio.valuationAmount === null && !folio.liveValue && folio.estimatedValuationAmount && (
+            <div title="No RTA balance report or live AMFI NAV match yet — valued at the most recent transaction's own NAV">
+              <p className="text-ink-muted">Estimated</p>
+              <Amount value={folio.estimatedValuationAmount} className="tabular-nums font-medium text-status-warning" />
+            </div>
+          )}
+          <div>
+            <p className="text-ink-muted">P&amp;L</p>
+            <GainLossStat investedAmount={folio.investedAmount} currentValue={effectiveCurrentValue(folio)} className="tabular-nums font-medium" />
+          </div>
         </div>
       </button>
       {expanded && <FolioTransactions folioId={folio.id} useTransactions={useTransactions} />}
@@ -176,7 +223,7 @@ export function FolioHoldingsExplorer({
       amcName: g.amcName,
       folios: g.folios,
       totalInvested: g.folios.reduce((sum, f) => sum + Number(f.investedAmount || 0), 0),
-      totalCurrent: g.folios.reduce((sum, f) => sum + Number(f.valuationAmount || 0), 0),
+      totalCurrent: g.folios.reduce((sum, f) => sum + effectiveCurrentValue(f), 0),
     }))
     .sort((a, b) => b.totalCurrent - a.totalCurrent);
 

@@ -1,7 +1,8 @@
 import { Job } from "bullmq";
-import { readdir, readFile } from "node:fs/promises";
-import { extname, join, relative, sep } from "node:path";
+import { readFile } from "node:fs/promises";
+import { extname } from "node:path";
 import { Prisma, prisma } from "@mfd/db";
+import { walkFolder, inferRtaType, RECOGNIZED_EXTENSIONS, type WalkedFile } from "@mfd/shared";
 import { decryptArchive, detectSourceFormat } from "./archive-decryption.processor";
 import { schemaMappingQueue } from "../queues/queue-producers";
 
@@ -21,37 +22,6 @@ export interface FolderImportJobData {
   camsZipPassword?: string;
   kfintechZipPassword?: string;
 }
-
-interface WalkedFile {
-  absolutePath: string;
-  relativePath: string;
-}
-
-async function walk(dir: string, root: string): Promise<WalkedFile[]> {
-  const entries = await readdir(dir, { withFileTypes: true });
-  const files: WalkedFile[] = [];
-  for (const entry of entries) {
-    const absolutePath = join(dir, entry.name);
-    if (entry.isDirectory()) {
-      files.push(...(await walk(absolutePath, root)));
-    } else if (entry.isFile()) {
-      files.push({ absolutePath, relativePath: relative(root, absolutePath) });
-    }
-  }
-  return files;
-}
-
-/** Infers CAMS vs KFintech from the file's own path segments (matches the real folder convention: top-level "cams"/"kfintech" subfolders), falling back to the file extension per NOTES.txt ("cams data in .dbf format, kfintech data in .csv") when the path gives no hint. */
-function inferRtaType(relativePath: string, ext: string): "CAMS" | "KFINTECH" | undefined {
-  const segments = relativePath.toLowerCase().split(sep);
-  if (segments.some((s) => s.includes("kfintech") || s.includes("karvy"))) return "KFINTECH";
-  if (segments.some((s) => s.includes("cams"))) return "CAMS";
-  if (ext === ".dbf") return "CAMS";
-  if (ext === ".csv") return "KFINTECH";
-  return undefined;
-}
-
-const RECOGNIZED_EXTENSIONS = new Set([".zip", ".dbf", ".csv", ".txt"]);
 
 /**
  * One-time "since inception" bulk import: walks an admin-specified local
@@ -73,7 +43,7 @@ export async function processFolderImport(job: Job<FolderImportJobData>) {
 
   let files: WalkedFile[];
   try {
-    files = await walk(folderPath, folderPath);
+    files = await walkFolder(folderPath, folderPath);
   } catch (err) {
     throw new Error(`Could not read folder "${folderPath}": ${err instanceof Error ? err.message : String(err)}`);
   }

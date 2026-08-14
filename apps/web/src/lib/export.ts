@@ -35,3 +35,9 @@ export async function downloadXlsx(filename: string, sheetName: string, headers:
   XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
   XLSX.writeFile(workbook, filename);
 }
+
+/** Plain tab-delimited .txt — for admins who want to eyeball/grep the raw export outside a spreadsheet tool. */
+export function downloadTxt(filename: string, headers: string[], rows: Array<Array<string | number>>) {
+  const lines = [headers.join("\t"), ...rows.map((r) => r.map(String).join("\t"))];
+  triggerDownload(new Blob([lines.join("\n")], { type: "text/plain;charset=utf-8;" }), filename);
+}

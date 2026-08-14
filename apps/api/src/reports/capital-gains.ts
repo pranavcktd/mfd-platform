@@ -65,6 +65,19 @@ export interface RealizedGainLot {
   /** Null when the correct rate depends on the investor's income slab (can't be known here) rather than being a flat statutory rate. */
   estimatedTaxRate: number | null;
   estimatedTax: number | null;
+  /**
+   * True when this lot is the "ran out of known purchase lots" fallback —
+   * the sale is real, but no matching PURCHASE/SWITCH_IN/BONUS transaction
+   * exists anywhere in this folio's ingested history to compute a real cost
+   * basis from (typically because since-inception import hasn't captured
+   * that folio's full history yet). costBasis=0/gain=100% and STCG here are
+   * NOT necessarily the true figures — the real purchase may have been held
+   * long enough for LTCG. Surfaced explicitly (not just inferred from
+   * costBasis===0, which a genuine bonus-unit lot could also show) so
+   * callers can flag these as "will change once full history is imported"
+   * rather than blending them silently into a trusted total.
+   */
+  costBasisUnknown: boolean;
 }
 
 const EQUITY_LTCG_THRESHOLD_DAYS = 365; // >12 months
@@ -223,6 +236,7 @@ export function computeFifoRealizedGains(
         taxCategory,
         grandfatheringApplicable: gf.applicable,
         grandfatheringApplied: gf.applied,
+        costBasisUnknown: false,
         ...tax,
       });
       lot.units -= unitsFromLot;
@@ -245,6 +259,7 @@ export function computeFifoRealizedGains(
         taxCategory,
         grandfatheringApplicable: false,
         grandfatheringApplied: false,
+        costBasisUnknown: true,
         estimatedTaxRate: taxCategory === "EQUITY" ? EQUITY_STCG_RATE : null,
         estimatedTax: taxCategory === "EQUITY" ? saleProceeds * EQUITY_STCG_RATE : null,
       });
@@ -267,6 +282,8 @@ export interface UnrealizedGainLot {
   grandfatheringApplied: boolean;
   estimatedTaxRate: number | null;
   estimatedTax: number | null;
+  /** Same meaning as RealizedGainLot's own field — see its doc comment. Here it flags the synthetic lot representing currentUnits that exceed what the ingested purchase history accounts for (a folio whose earliest purchases predate this system's captured history). */
+  costBasisUnknown: boolean;
 }
 
 /**
@@ -314,9 +331,16 @@ export function computeFifoUnrealizedGain(
   }
 
   const totalLotUnits = lots.reduce((sum, l) => sum + l.units, 0);
-  const valuePerUnit = totalLotUnits > EPSILON ? currentValue / totalLotUnits : currentUnits > EPSILON ? currentValue / currentUnits : 0;
+  // currentUnits (the folio's real, authoritative RTA/live balance) is the
+  // correct divisor whenever it's known — totalLotUnits is only a fallback
+  // for the unusual case where no live balance exists at all. Preferring
+  // totalLotUnits when it disagreed with currentUnits used to silently
+  // inflate the value (and gain) attributed to each KNOWN lot whenever
+  // purchase history was incomplete, since the same currentValue was being
+  // divided across fewer units than the folio actually holds.
+  const valuePerUnit = currentUnits > EPSILON ? currentValue / currentUnits : totalLotUnits > EPSILON ? currentValue / totalLotUnits : 0;
 
-  return lots.map((lot) => {
+  const result = lots.map((lot) => {
     const actualCostBasis = lot.units * lot.costPerUnit;
     const lotCurrentValue = lot.units * valuePerUnit;
     const gf = applyGrandfathering(taxCategory, lot.purchaseDate, lot.units, actualCostBasis, lotCurrentValue, grandfatherNavPerUnit);
@@ -332,7 +356,37 @@ export function computeFifoUnrealizedGain(
       taxCategory,
       grandfatheringApplicable: gf.applicable,
       grandfatheringApplied: gf.applied,
+      costBasisUnknown: false,
       ...tax,
     };
   });
+
+  // The folio holds more units than the ingested purchase history accounts
+  // for (earliest purchases predate this system's captured data — the same
+  // "ran out of lots" gap computeFifoRealizedGains flags, just discovered
+  // from the opposite direction: too many units left over instead of too
+  // many units to sell). Represented as one synthetic zero-cost lot, same
+  // shape as the realized-side fallback, rather than silently vanishing
+  // from the report.
+  const unallocatedUnits = currentUnits - totalLotUnits;
+  if (unallocatedUnits > EPSILON) {
+    const lotCurrentValue = unallocatedUnits * valuePerUnit;
+    result.push({
+      purchaseDate: asOfDate,
+      units: unallocatedUnits,
+      costBasis: 0,
+      currentValue: lotCurrentValue,
+      gain: lotCurrentValue,
+      holdingDays: 0,
+      taxCategory,
+      classification: "STCG",
+      grandfatheringApplicable: false,
+      grandfatheringApplied: false,
+      costBasisUnknown: true,
+      estimatedTaxRate: taxCategory === "EQUITY" ? EQUITY_STCG_RATE : null,
+      estimatedTax: taxCategory === "EQUITY" ? lotCurrentValue * EQUITY_STCG_RATE : null,
+    });
+  }
+
+  return result;
 }

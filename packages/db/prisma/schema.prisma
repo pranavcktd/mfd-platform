@@ -32,6 +32,14 @@ model Distributor {
   /// forever. Cleared by AuthService.changePassword.
   mustChangePassword Boolean           @default(true) @map("must_change_password")
   createdAt         DateTime           @default(now()) @map("created_at")
+  /// Soft-delete only — no cascading hard-delete exists anywhere in this
+  /// schema (a real MFD has thousands of dependent rows across ~12 tables:
+  /// clients, folios, transactions, SIPs, mail logs), so "Delete" in Super
+  /// Admin sets this instead of actually removing anything. Hides the MFD
+  /// from the default list; all data stays intact and recoverable by
+  /// clearing this field directly. Also forces isActive false so login is
+  /// blocked immediately, same as a manual disable.
+  deletedAt         DateTime?          @map("deleted_at")
 
   arnProfiles       ArnProfile[]
   families          Family[]
@@ -47,6 +55,7 @@ model Distributor {
   clientBankAccounts ClientBankAccount[]
   brokerageWithheldRows BrokerageWithheld[]
   systematicExpiryRows  RtaSystematicExpiry[]
+  brokerageEarnedRows   BrokerageEarned[]
 
   @@map("distributors")
 }
@@ -88,6 +97,9 @@ model ArnProfile {
   mailIngestionLogs  MailIngestionLog[]
   brokerageWithheldRows BrokerageWithheld[]
   systematicExpiryRows  RtaSystematicExpiry[]
+  brokerageEarnedRows   BrokerageEarned[]
+  clientNominees        ClientNominee[]
+  clientBankAccounts    ClientBankAccount[]
 
   @@index([distributorId])
   @@map("arn_profiles")
@@ -173,7 +185,19 @@ model RtaInsightLedger {
   rawStructuredPayload  Json        @map("raw_structured_payload")
   idempotencyHash       String      @unique @map("idempotency_hash")
 
+  /// Which real mail produced this row — unlike Transaction.mailLogId/
+  /// Folio.lastBalanceMailLogId (which only get set when the downstream
+  /// business logic actually applies the record, e.g. a balance report
+  /// gets skipped if it's not newer than what's already stored), this is
+  /// written unconditionally for EVERY report type/record parsed, making it
+  /// the one reliable universal source for "what did this mail actually
+  /// contain" — the Imported Data Explorer's real foundation, not a
+  /// per-report-type bolt-on.
+  mailLogId             String?           @map("mail_log_id") @db.Uuid
+  mailLog               MailIngestionLog? @relation(fields: [mailLogId], references: [id])
+
   @@index([distributorId, investorPan, folioNumber])
+  @@index([mailLogId])
   @@map("rta_insight_ledger")
 }
 
@@ -304,14 +328,27 @@ model ClientNominee {
   distributor    Distributor @relation(fields: [distributorId], references: [id])
   clientId       String      @map("client_id") @db.Uuid
   client         Client      @relation(fields: [clientId], references: [id])
+  /// Only set for source="RTA" rows — which ARN/mail produced this,
+  /// same traceability convention as every other RTA-ingested table.
+  arnProfileId   String?           @map("arn_profile_id") @db.Uuid
+  arnProfile     ArnProfile?       @relation(fields: [arnProfileId], references: [id])
+  mailLogId      String?           @map("mail_log_id") @db.Uuid
+  mailLog        MailIngestionLog? @relation(fields: [mailLogId], references: [id])
 
   nomineeName String  @map("nominee_name")
   relation    String?
   email       String?
   mobile      String?
-  /// "MANUAL" (default, MFD-entered) or "RTA" (once a nominee report is
-  /// ingested — reserved for that, unused today).
-  source      String  @default("MANUAL")
+  /// "MANUAL" (default, MFD-entered) or "RTA" — KFintech's MFSD264
+  /// (Nominee Details) now feeds this; CAMS has no known equivalent report
+  /// yet. Which real folio the RTA row came from, kept only for traceability
+  /// (a nominee is a client-level fact once written, same as every other
+  /// field on this table).
+  source       String  @default("MANUAL")
+  folioNumber  String? @map("folio_number")
+  /// Only set for source="RTA" rows — dedup key so a re-ingested MFSD264
+  /// file is a safe no-op, same pattern as every other RTA-fed table.
+  idempotencyHash String? @unique @map("idempotency_hash")
 
   createdAt DateTime @default(now()) @map("created_at")
 
@@ -330,17 +367,72 @@ model ClientBankAccount {
   distributor    Distributor @relation(fields: [distributorId], references: [id])
   clientId       String      @map("client_id") @db.Uuid
   client         Client      @relation(fields: [clientId], references: [id])
+  arnProfileId   String?           @map("arn_profile_id") @db.Uuid
+  arnProfile     ArnProfile?       @relation(fields: [arnProfileId], references: [id])
+  mailLogId      String?           @map("mail_log_id") @db.Uuid
+  mailLog        MailIngestionLog? @relation(fields: [mailLogId], references: [id])
 
   bankName      String  @map("bank_name")
   accountNumber String  @map("account_number")
   ifscCode      String? @map("ifsc_code")
   branchName    String? @map("branch_name")
+  /// "MANUAL" (default) or "RTA" — KFintech's MFSD263 (Registered Bank
+  /// Account Details) now feeds this; CAMS has no known equivalent yet.
   source        String  @default("MANUAL")
+  folioNumber   String? @map("folio_number")
+  idempotencyHash String? @unique @map("idempotency_hash")
 
   createdAt DateTime @default(now()) @map("created_at")
 
   @@index([clientId])
   @@map("client_bank_accounts")
+}
+
+/// Periodic brokerage/trailer fee actually EARNED by the distributor — CAMS's
+/// WBR6 ("My Trailer Fee Details") and KFintech's MFSD205 ("Transaction wise
+/// Brokerage Report"), both built 2026-08-09 from the RTAs' own reference
+/// docs, not yet verified against a real sample. Distinct from
+/// BrokerageWithheld (money CAMS is holding back due to invalid KYC) and
+/// from Transaction.brokerageAmount (the per-transaction incentive embedded
+/// in MFSD201/WBR2 itself) — this is the RTA's own periodic fee-crediting
+/// statement, with its own date range and rate per period.
+model BrokerageEarned {
+  id             String       @id @default(uuid()) @db.Uuid
+  distributorId  String       @map("distributor_id") @db.Uuid
+  distributor    Distributor  @relation(fields: [distributorId], references: [id])
+  arnProfileId   String?      @map("arn_profile_id") @db.Uuid
+  arnProfile     ArnProfile?  @relation(fields: [arnProfileId], references: [id])
+  folioId        String?      @map("folio_id") @db.Uuid
+  folio          Folio?       @relation(fields: [folioId], references: [id])
+  mailLogId      String?           @map("mail_log_id") @db.Uuid
+  mailLog        MailIngestionLog? @relation(fields: [mailLogId], references: [id])
+
+  folioNumber       String    @map("folio_number")
+  transactionNumber String?   @map("transaction_number")
+  investorName      String?   @map("investor_name")
+  investorPan       String?   @map("investor_pan")
+  amcCode           String?   @map("amc_code")
+  schemeCode        String?   @map("scheme_code")
+  /// CAMS: P/SI/TI (Purchase/Switch In/Transfer In). KFintech: free-text transaction description.
+  transactionType   String?   @map("transaction_type")
+  units             Decimal?  @db.Decimal(20, 4)
+  amount            Decimal?  @db.Decimal(20, 4)
+  brokerageRate     Decimal?  @map("brokerage_rate") @db.Decimal(10, 4)
+  brokerageAmount   Decimal?  @map("brokerage_amount") @db.Decimal(20, 4)
+  /// CAMS-only: "AFE" or "TF". Null for KFintech (MFSD205 has no equivalent flag).
+  feeType           String?   @map("fee_type")
+  transactionDate   DateTime? @map("transaction_date") @db.Date
+  feeFromDate       DateTime? @map("fee_from_date") @db.Date
+  feeToDate         DateTime? @map("fee_to_date") @db.Date
+  processedDate     DateTime? @map("processed_date") @db.Date
+  brokerArnCode     String?   @map("broker_arn_code")
+
+  idempotencyHash String   @unique @map("idempotency_hash")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@index([distributorId])
+  @@index([folioId])
+  @@map("brokerage_earned")
 }
 
 /// Manually-entered non-MF asset (real estate, FD, gold, direct equity, etc.)
@@ -415,6 +507,29 @@ model EquityIsinMaster {
   @@map("equity_isin_master")
 }
 
+/// Audit trail for each Equity ISIN Master import run — same "one row per
+/// run" pattern as NavSyncLog/MailIngestionLog, added because there was no
+/// history of past imports at all before this (only the most recent
+/// result, shown transiently in the UI and lost on refresh).
+model EquityIsinImportLog {
+  id             String    @id @default(uuid()) @db.Uuid
+  triggeredAt    DateTime  @default(now()) @map("triggered_at")
+  completedAt    DateTime? @map("completed_at")
+  status         String    @default("RUNNING")
+  folderPath     String    @map("folder_path")
+  nseFile        String?   @map("nse_file")
+  bseFile        String?   @map("bse_file")
+  totalIsins     Int?      @map("total_isins")
+  upserted       Int?
+  nseOnly        Int?      @map("nse_only")
+  bseOnly        Int?      @map("bse_only")
+  tradedOnBoth   Int?      @map("traded_on_both")
+  withPriceData  Int?      @map("with_price_data")
+  errorMessage   String?   @map("error_message")
+
+  @@map("equity_isin_import_logs")
+}
+
 /// One client's holding in one scheme. arnProfileId records which ARN the
 /// business is booked under, for brokerage attribution.
 model Folio {
@@ -456,6 +571,20 @@ model Folio {
   valuationAmount  Decimal?  @map("valuation_amount") @db.Decimal(18, 2)
   navPerUnit       Decimal?  @map("nav_per_unit") @db.Decimal(12, 4)
   balanceAsOfDate  DateTime? @map("balance_as_of_date") @db.Date
+
+  /// Persisted fallback for a folio that has NEVER received an RTA balance
+  /// report (WBR4/CLIENT_AUM/MFSD203) at all — real confirmed case: a
+  /// client with a genuine lumpsum PURCHASE transaction (real units, real
+  /// amount) but every balance* field above null, because no balance
+  /// report has arrived for that folio yet. Replayed from transaction
+  /// history (see computeFolioCurrentUnitsFromTransactions), valued at the
+  /// most recent transaction's own NAV. Persisted (not just computed
+  /// on-read) so raw-SQL AUM aggregates across the app (dashboard,
+  /// client-list totals) can COALESCE onto it too, not just the single
+  /// client-detail view. Always null once a real balance report exists —
+  /// balanceUnits/valuationAmount above always win when present.
+  estimatedBalanceUnits    Decimal?  @map("estimated_balance_units") @db.Decimal(18, 4)
+  estimatedValuationAmount Decimal?  @map("estimated_valuation_amount") @db.Decimal(18, 2)
 
   /// "RTA_MAILBACK" (default, existing convention — nothing about already-
   /// ingested rows changes) or "CAS_IMPORT" (2026-07-24, Import External
@@ -515,6 +644,7 @@ model Folio {
   sipRegistrations  SipRegistration[]
   brokerageWithheldRows BrokerageWithheld[]
   systematicExpiryRows  RtaSystematicExpiry[]
+  brokerageEarnedRows   BrokerageEarned[]
 
   @@unique([distributorId, amcCode, folioNumber, schemeCode])
   @@index([distributorId, clientId])
@@ -539,6 +669,9 @@ model BrokerageWithheld {
   arnProfile     ArnProfile?  @relation(fields: [arnProfileId], references: [id])
   folioId        String?      @map("folio_id") @db.Uuid
   folio          Folio?       @relation(fields: [folioId], references: [id])
+  /// Which real RTA mail produced this row — same traceability convention as Transaction.mailLogId.
+  mailLogId      String?           @map("mail_log_id") @db.Uuid
+  mailLog        MailIngestionLog? @relation(fields: [mailLogId], references: [id])
 
   folioNumber           String    @map("folio_number")
   transactionNumber     String?   @map("transaction_number")
@@ -564,6 +697,7 @@ model BrokerageWithheld {
 
   @@index([distributorId])
   @@index([folioId])
+  @@index([mailLogId])
   @@map("brokerage_withheld")
 }
 
@@ -581,6 +715,9 @@ model RtaSystematicExpiry {
   arnProfile     ArnProfile?  @relation(fields: [arnProfileId], references: [id])
   folioId        String?      @map("folio_id") @db.Uuid
   folio          Folio?       @relation(fields: [folioId], references: [id])
+  /// Which real RTA mail produced this row — same traceability convention as Transaction.mailLogId.
+  mailLogId      String?           @map("mail_log_id") @db.Uuid
+  mailLog        MailIngestionLog? @relation(fields: [mailLogId], references: [id])
 
   folioNumber     String    @map("folio_number")
   refNumber       String?   @map("ref_number")
@@ -609,6 +746,7 @@ model RtaSystematicExpiry {
   createdAt       DateTime @default(now()) @map("created_at")
 
   @@index([distributorId])
+  @@index([mailLogId])
   @@map("rta_systematic_expiry")
 }
 
@@ -695,10 +833,35 @@ model SchemeNavHistory {
   navDate   DateTime @map("nav_date") @db.Date
   nav       Decimal  @db.Decimal(20, 4)
   createdAt DateTime @default(now()) @map("created_at")
+  /// Which sync run wrote/last-confirmed this row — both nav-sync.processor.ts
+  /// (DAILY) and nav-history-backfill.processor.ts (HISTORY_BACKFILL) now
+  /// reattribute on every ON CONFLICT re-run, so this always reflects the
+  /// most recent run that touched the row, not just its original insert.
+  /// Powers the NAV Sync page's per-run "View" button.
+  navSyncLogId String?     @map("nav_sync_log_id") @db.Uuid
+  navSyncLog   NavSyncLog? @relation(fields: [navSyncLogId], references: [id])
 
   @@unique([isin, navDate])
   @@index([isin])
+  @@index([navSyncLogId])
   @@map("scheme_nav_history")
+}
+
+/// Which real email domain/address each RTA sends its mail from — was a
+/// hardcoded constant (mail-link-extraction.ts's SENDER_DOMAINS) before
+/// this, requiring a code change + deploy if CAMS or KFintech ever
+/// changed their sending address. Exactly one row per rtaType ("CAMS",
+/// "KFINTECH") — mail-ingestion.processor.ts reads this table on each
+/// poll cycle instead of the old constant. senderIdentifier is matched
+/// via case-insensitive substring against the mail's From address, same
+/// matching rule identifyRtaSender always used.
+model RtaSenderConfig {
+  id                String   @id @default(uuid()) @db.Uuid
+  rtaType           String   @unique @map("rta_type")
+  senderIdentifier  String   @map("sender_identifier")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  @@map("rta_sender_config")
 }
 
 /// Audit trail for the daily AMFI NAV sync — same "one row per run,
@@ -719,6 +882,7 @@ model NavSyncLog {
   totalRowsInFile  Int?      @map("total_rows_in_file")
   schemesMatched   Int?      @map("schemes_matched")
   errorMessage     String?   @map("error_message")
+  navHistoryRows   SchemeNavHistory[]
 
   @@map("nav_sync_logs")
 }
@@ -746,16 +910,28 @@ model SipRegistration {
   // if this is ever revisited, not another db push.
   sipAmount        Decimal?    @db.Decimal(18, 2)
   frequency        String?
+  /// "SIP" | "STP" | "SWP" — CAMS's WBR49 doesn't label this directly, it's
+  /// derived from AUT_TRNTYP (P=purchase/SIP, SO+DTP=switch-out/STP,
+  /// R=redemption/SWP; confirmed 2026-08-11 against two real decrypted WBR49
+  /// archives). KFintech's MFSD243 spells it out directly in its own Trtype
+  /// column ("SIP"/"STP"/"SWP"). Null for rows synced before this field
+  /// existed, or for any AUT_TRNTYP code not in the known set above.
+  registrationType String?     @map("registration_type")
   startDate        DateTime?   @map("start_date") @db.Date
   endDate          DateTime?   @map("end_date") @db.Date
   registrationDate DateTime    @map("registration_date") @db.Date
   ceaseDate        DateTime?   @map("cease_date") @db.Date
   isActive         Boolean     @map("is_active")
 
+  /// Which real RTA mail produced this row (WBR49/MFSD243) — same traceability convention as Transaction.mailLogId.
+  mailLogId        String?           @map("mail_log_id") @db.Uuid
+  mailLog          MailIngestionLog? @relation(fields: [mailLogId], references: [id])
+
   idempotencyHash  String      @unique @map("idempotency_hash")
   createdAt        DateTime    @default(now()) @map("created_at")
 
   @@index([distributorId, folioId])
+  @@index([mailLogId])
   @@map("sip_registrations")
 }
 
@@ -810,6 +986,13 @@ model MailIngestionLog {
 
   transactions          Transaction[]
   foliosLastBalanced    Folio[]
+  sipRegistrations      SipRegistration[]
+  brokerageWithheldRows BrokerageWithheld[]
+  systematicExpiryRows  RtaSystematicExpiry[]
+  insightLedgerRows     RtaInsightLedger[]
+  brokerageEarnedRows   BrokerageEarned[]
+  clientNominees        ClientNominee[]
+  clientBankAccounts    ClientBankAccount[]
 
   @@index([rtaType, createdAt])
   @@index([distributorId])

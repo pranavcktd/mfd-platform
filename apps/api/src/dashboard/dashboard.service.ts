@@ -2,6 +2,7 @@ import { Injectable } from "@nestjs/common";
 import { Prisma, prisma } from "@mfd/db";
 import { resolveAmcName } from "@mfd/shared";
 import { TenantContext } from "../tenant/tenant-context";
+import { monthlyEquivalentAmount } from "../reports/sip-frequency";
 
 const RECENT_CLIENTS_PAGE_SIZE = 10;
 
@@ -31,8 +32,14 @@ export class DashboardService {
     }
 
     const folioWhere = { distributorId, ...(arnScope ? { arnProfileId: { in: arnScope } } : {}) };
+    // registrationType: "SIP" is required, not optional — real bug fixed
+    // 2026-08-12: before SipRegistration.registrationType existed, this
+    // blended active STP/SWP registrations in under the Dashboard's own
+    // "Active SIPs"/"Monthly SIP Value" tiles too. See reports.service.ts's
+    // getRegistrationReport doc comment.
     const sipWhere = {
       distributorId,
+      registrationType: "SIP" as const,
       isActive: true,
       ...(arnScope ? { folio: { arnProfileId: { in: arnScope } } } : {}),
     };
@@ -49,24 +56,51 @@ export class DashboardService {
     const clientWhere = scopedClientIds ? { id: { in: scopedClientIds } } : { distributorId };
 
     const [
-      aumAgg,
+      totalAumRows,
+      classifiedAumRows,
       liveAumRows,
       totalClients,
       nonPanClients,
-      activeSipAgg,
+      activeSipRegistrations,
       activeSipCount,
       topAmcRows,
       topClientRows,
+      lastRtaImports,
+      navSyncLog,
+      navValueDateRow,
     ] = await Promise.all([
-      prisma.folio.aggregate({ where: folioWhere, _sum: { valuationAmount: true } }),
+      // COALESCE(valuation_amount, estimated_valuation_amount): a folio
+      // that's never received an RTA balance report contributes its
+      // transaction-replay estimate instead of silently vanishing from
+      // Total AUM (real confirmed gap — see Folio.estimatedValuationAmount's
+      // doc comment). Never overrides a real valuation_amount when present.
+      prisma.$queryRaw<Array<{ totalAum: string | null }>>`
+        SELECT SUM(COALESCE(f.valuation_amount, f.estimated_valuation_amount))::text AS "totalAum"
+        FROM folios f
+        WHERE f.distributor_id = ${distributorId}::uuid
+          ${arnScope ? Prisma.sql`AND f.arn_profile_id = ANY(${arnScope}::uuid[])` : Prisma.empty}
+      `,
+      // "Unclassified AUM" — same definition Analysis already uses
+      // (analysis.service.ts): AUM whose folio has no assetClass captured
+      // (RTA's SCHEME_TYP/AssetType field never populated for it), computed
+      // here too rather than making the dashboard fetch a whole separate
+      // Analysis summary just for this one figure.
+      prisma.$queryRaw<Array<{ classifiedAum: string | null }>>`
+        SELECT SUM(COALESCE(f.valuation_amount, f.estimated_valuation_amount))::text AS "classifiedAum"
+        FROM folios f
+        WHERE f.distributor_id = ${distributorId}::uuid AND f.asset_class IS NOT NULL
+          ${arnScope ? Prisma.sql`AND f.arn_profile_id = ANY(${arnScope}::uuid[])` : Prisma.empty}
+      `,
       // Independently derived from today's real AMFI NAV × each folio's
-      // last-known unit balance — not the RTA's own (often weeks-stale)
+      // last-known unit balance (falling back to the transaction-replay
+      // estimate when there's no RTA balance report — same COALESCE as
+      // totalAum above) — not the RTA's own (often weeks-stale)
       // valuationAmount snapshot. Only sums folios whose scheme has been
       // matched to a live NAV (see nav-sync.processor.ts / Folio.isin);
       // NULL (not 0) when none have, so the frontend can distinguish
       // "genuinely zero" from "no live data yet".
       prisma.$queryRaw<Array<{ liveAum: string | null }>>`
-        SELECT SUM(f.balance_units * sm.latest_nav)::text AS "liveAum"
+        SELECT SUM(COALESCE(f.balance_units, f.estimated_balance_units) * sm.latest_nav)::text AS "liveAum"
         FROM folios f
         JOIN scheme_master sm ON sm.isin = f.isin AND sm.latest_nav IS NOT NULL
         WHERE f.distributor_id = ${distributorId}::uuid
@@ -74,7 +108,7 @@ export class DashboardService {
       `,
       prisma.client.count({ where: clientWhere }),
       prisma.client.count({ where: { ...clientWhere, panNumber: null } }),
-      prisma.sipRegistration.aggregate({ where: sipWhere, _sum: { sipAmount: true } }),
+      prisma.sipRegistration.findMany({ where: sipWhere, select: { sipAmount: true, frequency: true } }),
       prisma.sipRegistration.count({ where: sipWhere }),
       // valuationAmount: { not: null } matters here, not just for a clean
       // query: Postgres sorts NULL first in a DESC ORDER BY by default, so
@@ -95,6 +129,26 @@ export class DashboardService {
         orderBy: { _sum: { valuationAmount: "desc" } },
         take: 5,
       }),
+      // Most recent successfully-processed mail, PER RTA type (CAMS and
+      // KFintech run on independent schedules/mailboxes and can be out of
+      // sync with each other) — updatedAt (not receivedAt) is when it
+      // actually finished moving through ingestion->decryption->
+      // schema-mapping to COMPLETED, which is what "when was data last
+      // imported" really means (receivedAt can predate that by however
+      // long the pipeline took to process it).
+      this.getLastRtaImports(distributorId, arnScope),
+      // NAV sync is platform-wide (one shared AMFI file for every tenant),
+      // not distributor-scoped — when we last successfully fetched it.
+      prisma.navSyncLog.findFirst({
+        where: { syncType: "DAILY", status: "COMPLETED" },
+        orderBy: { completedAt: "desc" },
+        select: { completedAt: true },
+      }),
+      // The NAV *value* date embedded in that file (what date's price is
+      // actually live right now) — distinct from when we fetched it, since
+      // AMFI sometimes serves the prior day's file for a few hours before
+      // publishing the new one.
+      prisma.schemeMaster.aggregate({ _max: { latestNavDate: true } }),
     ]);
 
     const topClientIds = topClientRows.map((r) => r.clientId);
@@ -115,12 +169,32 @@ export class DashboardService {
     });
     const schemeNameByAmc = new Map(sampleNames.map((s) => [s.amcCode, s.schemeName]));
 
+    const [dayChangeAum, monthChangeAum] = await Promise.all([
+      this.computeAumChange(distributorId, arnScope, 1),
+      this.computeAumChange(distributorId, arnScope, 30),
+    ]);
+
+    const totalAum = Number(totalAumRows[0]?.totalAum ?? 0);
+    const classifiedAum = Number(classifiedAumRows[0]?.classifiedAum ?? 0);
+    // Same near-zero clamp Analysis uses — a floating-point subtraction of
+    // two large near-equal sums can land on a tiny artifact instead of 0.
+    const unclassifiedAum = Math.abs(totalAum - classifiedAum) < 1 ? 0 : totalAum - classifiedAum;
+
     return {
-      totalAum: aumAgg._sum.valuationAmount?.toString() ?? "0",
+      totalAum: totalAumRows[0]?.totalAum ?? "0",
       liveAum: liveAumRows[0]?.liveAum ?? null,
+      unclassifiedAum: unclassifiedAum.toString(),
+      dayChangeAum,
+      monthChangeAum,
+      lastRtaImports,
+      navStatus: { valueDate: navValueDateRow._max.latestNavDate, syncedAt: navSyncLog?.completedAt ?? null },
       totalClients,
       nonPanClients,
-      monthlySipValue: activeSipAgg._sum.sipAmount?.toString() ?? "0",
+      // Monthly-equivalent, not a raw sum — a quarterly SIP's full
+      // installment isn't "this month's" value (see monthlyEquivalentAmount).
+      monthlySipValue: activeSipRegistrations
+        .reduce((sum, s) => sum + monthlyEquivalentAmount(Number(s.sipAmount ?? 0), s.frequency), 0)
+        .toFixed(2),
       activeSips: activeSipCount,
       topAmcs: topAmcRows.map((r) => ({
         amcCode: r.amcCode,
@@ -135,9 +209,15 @@ export class DashboardService {
   }
 
   private emptySummary() {
+    const emptyChange = { amount: null, percent: null, asOfDate: null, coveragePercent: null };
     return {
       totalAum: "0",
       liveAum: null,
+      unclassifiedAum: "0",
+      dayChangeAum: emptyChange,
+      monthChangeAum: emptyChange,
+      lastRtaImports: [],
+      navStatus: { valueDate: null, syncedAt: null },
       totalClients: 0,
       nonPanClients: 0,
       monthlySipValue: "0",
@@ -145,6 +225,173 @@ export class DashboardService {
       topAmcs: [],
       topClients: [],
     };
+  }
+
+  /**
+   * Latest successfully-COMPLETED mail per RTA type actually seen for this
+   * distributor (not hardcoded to CAMS/KFintech, so a future RTA type shows
+   * up automatically) — CAMS and KFintech are independent mailboxes/reports
+   * and can genuinely be out of sync with each other, so a single combined
+   * "last import" figure would hide one RTA silently falling behind.
+   */
+  private async getLastRtaImports(distributorId: string, arnScope: string[] | undefined) {
+    const rtaTypes = await prisma.mailIngestionLog.findMany({
+      where: { distributorId, ...(arnScope ? { arnProfileId: { in: arnScope } } : {}) },
+      distinct: ["rtaType"],
+      select: { rtaType: true },
+    });
+
+    const results = await Promise.all(
+      rtaTypes.map(async ({ rtaType }) => {
+        const log = await prisma.mailIngestionLog.findFirst({
+          where: { distributorId, rtaType, status: "COMPLETED", ...(arnScope ? { arnProfileId: { in: arnScope } } : {}) },
+          orderBy: { updatedAt: "desc" },
+          select: { receivedAt: true, updatedAt: true },
+        });
+        return { rtaType, receivedAt: log?.receivedAt ?? null, importedAt: log?.updatedAt ?? null };
+      }),
+    );
+    return results.sort((a, b) => a.rtaType.localeCompare(b.rtaType));
+  }
+
+  /**
+   * PAN/folio/scheme-wise detail behind the dashboard's "Unclassified AUM"
+   * tile — every folio with a real reported value but no assetClass
+   * captured from the RTA. Same folioWhere scoping (distributor + optional
+   * ARN filter) as getSummary, kept as its own on-demand call rather than
+   * always embedding the full list in the summary payload.
+   */
+  async getUnclassifiedFolios(requestedArnProfileIds?: string[]) {
+    const distributorId = TenantContext.currentDistributorId();
+    let arnScope: string[] | undefined;
+    if (requestedArnProfileIds && requestedArnProfileIds.length > 0) {
+      const owned = await prisma.arnProfile.findMany({
+        where: { distributorId, id: { in: requestedArnProfileIds } },
+        select: { id: true },
+      });
+      arnScope = owned.map((a) => a.id);
+      if (arnScope.length === 0) return [];
+    }
+
+    const folios = await prisma.folio.findMany({
+      where: {
+        distributorId,
+        assetClass: null,
+        ...(arnScope ? { arnProfileId: { in: arnScope } } : {}),
+      },
+      orderBy: { valuationAmount: "desc" },
+      select: {
+        id: true,
+        folioNumber: true,
+        amcCode: true,
+        schemeCode: true,
+        schemeName: true,
+        valuationAmount: true,
+        client: { select: { id: true, name: true, panNumber: true } },
+      },
+    });
+
+    return folios.map((f) => ({
+      folioId: f.id,
+      clientId: f.client.id,
+      clientName: f.client.name,
+      panNumber: f.client.panNumber,
+      folioNumber: f.folioNumber,
+      amcCode: f.amcCode,
+      schemeCode: f.schemeCode,
+      schemeName: f.schemeName,
+      valuationAmount: f.valuationAmount?.toString() ?? "0",
+    }));
+  }
+
+  /**
+   * AUM change vs. N calendar days ago — compares today's live AUM (today's
+   * AMFI NAV × last-known units) against the same folios' value using the
+   * nearest real historical AMFI NAV on or before the target date (AMFI
+   * doesn't publish on weekends/holidays, so this is never a hard match on
+   * the exact calendar date). Only over folios matched on BOTH ends (a real
+   * ISIN, today's live NAV, AND a historical NAV point) so the two totals
+   * are directly comparable — a folio added yesterday can't fake a
+   * "change" just by existing on one side and not the other. Each ISIN's
+   * historical match is capped to within NAV_MATCH_TOLERANCE_DAYS of the
+   * target — without this, a scheme with a gap in backfilled history (e.g.
+   * asking for "90 days ago" when only the last 35 days were backfilled)
+   * would silently fall back to whatever much-older NAV happens to exist
+   * (confirmed live: a 90-day request matched a 17-month-old row and
+   * produced a fabricated-looking "+179%"), which is a wrong number, not a
+   * conservative one. Returns null fields (not a fabricated 0%) when there
+   * isn't yet enough backfilled/accumulated NAV history to answer — see
+   * nav-history-backfill.processor.ts.
+   */
+  private async computeAumChange(distributorId: string, arnScope: string[] | undefined, daysAgo: number) {
+    const NAV_MATCH_TOLERANCE_DAYS = 10;
+    const targetDate = new Date();
+    targetDate.setUTCDate(targetDate.getUTCDate() - daysAgo);
+    const earliestAcceptableDate = new Date(targetDate);
+    earliestAcceptableDate.setUTCDate(earliestAcceptableDate.getUTCDate() - NAV_MATCH_TOLERANCE_DAYS);
+
+    const rows = await prisma.$queryRaw<
+      Array<{ todayAum: string | null; histAum: string | null; histDate: Date | null }>
+    >`
+      SELECT
+        SUM(COALESCE(f.balance_units, f.estimated_balance_units) * sm.latest_nav)::text AS "todayAum",
+        SUM(COALESCE(f.balance_units, f.estimated_balance_units) * h.nav)::text AS "histAum",
+        MAX(h.nav_date) AS "histDate"
+      FROM folios f
+      JOIN scheme_master sm ON sm.isin = f.isin AND sm.latest_nav IS NOT NULL
+      JOIN LATERAL (
+        SELECT nav, nav_date FROM scheme_nav_history snh
+        WHERE snh.isin = f.isin AND snh.nav_date <= ${targetDate}::date AND snh.nav_date >= ${earliestAcceptableDate}::date
+        ORDER BY snh.nav_date DESC
+        LIMIT 1
+      ) h ON true
+      WHERE f.distributor_id = ${distributorId}::uuid
+        ${arnScope ? Prisma.sql`AND f.arn_profile_id = ANY(${arnScope}::uuid[])` : Prisma.empty}
+    `;
+
+    const row = rows[0];
+    const today = row?.todayAum !== null && row?.todayAum !== undefined ? Number(row.todayAum) : null;
+    const hist = row?.histAum !== null && row?.histAum !== undefined ? Number(row.histAum) : null;
+    if (today === null || hist === null || hist === 0) {
+      return { amount: null, percent: null, asOfDate: null, coveragePercent: null };
+    }
+
+    // Coverage against the same live-NAV-matched universe liveAum already
+    // uses, so the caveat reflects "how much of what CAN have a live price
+    // is also covered by history" — not diluted by folios with no ISIN at all.
+    const liveTotalRows = await prisma.$queryRaw<Array<{ liveAum: string | null }>>`
+      SELECT SUM(COALESCE(f.balance_units, f.estimated_balance_units) * sm.latest_nav)::text AS "liveAum"
+      FROM folios f
+      JOIN scheme_master sm ON sm.isin = f.isin AND sm.latest_nav IS NOT NULL
+      WHERE f.distributor_id = ${distributorId}::uuid
+        ${arnScope ? Prisma.sql`AND f.arn_profile_id = ANY(${arnScope}::uuid[])` : Prisma.empty}
+    `;
+    const liveTotal = Number(liveTotalRows[0]?.liveAum ?? 0);
+    const coveragePercent = liveTotal > 0 ? ((today / liveTotal) * 100).toFixed(1) : null;
+
+    return {
+      amount: (today - hist).toFixed(2),
+      percent: ((today - hist) / hist * 100).toFixed(2),
+      asOfDate: row?.histDate ?? null,
+      coveragePercent,
+    };
+  }
+
+  /** Same AUM-change computation as the dashboard's default Day/Month cards, exposed with an arbitrary look-back so the frontend can offer a custom date-range filter beyond the two defaults. */
+  async getAumChange(days: number, requestedArnProfileIds?: string[]) {
+    const distributorId = TenantContext.currentDistributorId();
+    let arnScope: string[] | undefined;
+    if (requestedArnProfileIds && requestedArnProfileIds.length > 0) {
+      const owned = await prisma.arnProfile.findMany({
+        where: { distributorId, id: { in: requestedArnProfileIds } },
+        select: { id: true },
+      });
+      arnScope = owned.map((a) => a.id);
+      if (arnScope.length === 0) {
+        return { amount: null, percent: null, asOfDate: null, coveragePercent: null };
+      }
+    }
+    return this.computeAumChange(distributorId, arnScope, days);
   }
 
   /**

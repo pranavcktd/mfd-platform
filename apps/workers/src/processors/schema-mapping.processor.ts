@@ -5,12 +5,17 @@ import {
   identifyReport,
   mapMfsd201Record,
   mapInvestorMasterRecord,
+  mapInvestorMasterNominees,
   mapClientAumRecord,
   mapSipRegistrationRecord,
   mapKycStatusRecord,
+  mapPanKycStatusRecord,
   mapBrokerageWithheldRecord,
+  mapBrokerageEarnedRecord,
   mapSipExpiryRecord,
   mapSchemeMasterRecord,
+  mapBankAccountDetailsRecords,
+  mapNomineeDetailsRecords,
 } from "@mfd/shared";
 import { readDbfRecords } from "../parsing/dbf-reader";
 import { readDelimitedRecords } from "../parsing/delimited-reader";
@@ -20,8 +25,12 @@ import {
   updateFolioBalance,
   upsertSipRegistration,
   updateFolioKycStatus,
+  updateFolioKycStatusByPan,
   findFolioIdBestEffort,
   upsertSchemeMasterRows,
+  refreshEstimatedFolioBalance,
+  upsertClientBankAccountFromRta,
+  upsertClientNomineeFromRta,
 } from "../crm-sync";
 import { resolveTenantFromRecords, type ResolvedTenant } from "../tenant-resolution";
 
@@ -78,7 +87,7 @@ async function resolveTenant(
   records: Array<{ brokerArnCode?: string }>,
   expectedDistributorId: string | undefined,
 ): Promise<ResolvedTenant> {
-  const tenant = await resolveTenantFromRecords(records);
+  const tenant = await resolveTenantFromRecords(records, expectedDistributorId);
   if (expectedDistributorId && expectedDistributorId !== tenant.distributorId) {
     throw new Error(
       `Tenant mismatch: mail-routing expected distributorId=${expectedDistributorId} but the ARN code in the ` +
@@ -182,6 +191,7 @@ async function runSchemaMapping(args: {
         distributorId,
         rtaType,
         reportCode,
+        mailLogId,
         investorPan: r.investorPan,
         folioNumber: r.folioNumber,
         amcCode: r.amcCode,
@@ -257,6 +267,14 @@ async function runSchemaMapping(args: {
         });
       }
       await prisma.transaction.createMany({ data: transactionRows, skipDuplicates: true });
+      // Keeps a folio's estimated balance/valuation current when it's never
+      // received a real balance report — a no-op the moment one exists
+      // (see refreshEstimatedFolioBalance's own doc comment). One call per
+      // unique folio touched by this batch, not per transaction row.
+      const touchedFolioIds = new Set(transactionRows.map((r) => r.folioId));
+      for (const folioId of touchedFolioIds) {
+        await refreshEstimatedFolioBalance(folioId);
+      }
       break;
     }
     case "INVESTOR_MASTER": {
@@ -269,6 +287,7 @@ async function runSchemaMapping(args: {
         distributorId,
         rtaType,
         reportCode,
+        mailLogId,
         investorPan: r.investorPan,
         folioNumber: r.folioNumber,
         amcCode: r.amcCode,
@@ -304,6 +323,26 @@ async function runSchemaMapping(args: {
           rtaType,
         });
       }
+
+      // CAMS's WBR9/WBR9C carry up to 3 nominees inline on the same row —
+      // see mapInvestorMasterNominees's doc comment. No-op for KFintech
+      // (returns []), whose nominee data comes via the separate
+      // NOMINEE_DETAILS/MFSD264 report instead.
+      for (const raw of rawRecords) {
+        const nominees = mapInvestorMasterNominees(raw, rtaType);
+        for (const n of nominees) {
+          await upsertClientNomineeFromRta({
+            distributorId,
+            arnProfileId,
+            investorPan: n.investorPan,
+            folioNumber: n.folioNumber,
+            nomineeName: n.nomineeName ?? "Unknown",
+            nomineeRelation: n.nomineeRelation,
+            idempotencyHash: hash([distributorId, n.folioNumber, n.investorPan, n.nomineeSlot, n.nomineeName]),
+            mailLogId,
+          });
+        }
+      }
       break;
     }
     case "CLIENT_AUM": {
@@ -316,6 +355,7 @@ async function runSchemaMapping(args: {
         distributorId,
         rtaType,
         reportCode,
+        mailLogId,
         investorPan: r.investorPan,
         folioNumber: r.folioNumber,
         amcCode: r.amcCode,
@@ -362,6 +402,7 @@ async function runSchemaMapping(args: {
         distributorId,
         rtaType,
         reportCode,
+        mailLogId,
         investorPan: r.investorPan,
         folioNumber: r.folioNumber,
         amcCode: r.amcCode,
@@ -414,25 +455,36 @@ async function runSchemaMapping(args: {
           registrationDate: r.registrationDate,
           ceaseDate: r.ceaseDate,
           isActive: r.isActive,
+          registrationType: r.registrationType,
           idempotencyHash: rows[i].idempotencyHash,
+          mailLogId,
         });
       }
       break;
     }
     case "KYC_STATUS": {
-      const normalized = rawRecords.map((raw) => mapKycStatusRecord(raw));
+      const normalized = rawRecords.map((raw) => mapKycStatusRecord(raw, rtaType));
       const { distributorId, arnProfileId } = await resolveTenant(normalized, expectedDistributorId);
       resolvedDistributorId = distributorId;
       resolvedArnProfileId = arnProfileId;
+
+      // KFintech's MFSD239 has no report-generation-date field at all
+      // (unlike CAMS's WBR56, which always has REP_DATE) — falls back to
+      // "when this mail was processed" as the best available freshness
+      // signal for the newer-date guard in updateFolioKycStatus, rather
+      // than leaving it undefined (which would make that guard a permanent
+      // no-op for every KFintech KYC row).
+      const processedAt = new Date();
 
       rows = normalized.map((r) => ({
         distributorId,
         rtaType,
         reportCode,
+        mailLogId,
         investorPan: r.investorPan,
         folioNumber: r.folioNumber,
         amcCode: r.amcCode,
-        transactionDate: r.reportDate,
+        transactionDate: r.reportDate ?? processedAt,
         rawStructuredPayload: toJsonPayload(r),
         // A periodically-refreshed snapshot, not an immutable event — the
         // same folio's status re-reported on a later date is a genuinely
@@ -449,7 +501,108 @@ async function runSchemaMapping(args: {
           kycStatus: r.kycStatus,
           kycStatusDescription: r.kycStatusDescription,
           aadhaarStatus: r.aadhaarStatus,
-          reportDate: r.reportDate,
+          reportDate: r.reportDate ?? processedAt,
+        });
+      }
+      break;
+    }
+    case "PAN_KYC_STATUS": {
+      const normalized = rawRecords.map((raw) => mapPanKycStatusRecord(raw));
+      const { distributorId, arnProfileId } = await resolveTenant(normalized, expectedDistributorId);
+      resolvedDistributorId = distributorId;
+      resolvedArnProfileId = arnProfileId;
+      const processedAt = new Date();
+
+      rows = normalized.map((r) => ({
+        distributorId,
+        rtaType,
+        reportCode,
+        mailLogId,
+        investorPan: r.investorPan,
+        amcCode: r.amcCode,
+        transactionDate: r.reportDate ?? processedAt,
+        rawStructuredPayload: toJsonPayload(r),
+        idempotencyHash: hash([distributorId, r.investorPan, r.amcCode, r.reportDate?.toISOString()]),
+      }));
+
+      for (const r of normalized) {
+        await updateFolioKycStatusByPan({
+          distributorId,
+          investorPan: r.investorPan,
+          kycStatus: r.kycStatusCode,
+          kycStatusDescription: r.kycStatusDescription,
+          reportDate: r.reportDate ?? processedAt,
+        });
+      }
+      break;
+    }
+    case "BANK_ACCOUNT_DETAILS": {
+      // Fans out — each source row can carry up to 10 real bank accounts
+      // (see bank-account-details.ts), so this is a flatMap, not a map.
+      const normalized = rawRecords.flatMap((raw) => mapBankAccountDetailsRecords(raw));
+      const { distributorId, arnProfileId } = await resolveTenant(normalized, expectedDistributorId);
+      resolvedDistributorId = distributorId;
+      resolvedArnProfileId = arnProfileId;
+
+      rows = normalized.map((r) => ({
+        distributorId,
+        rtaType,
+        reportCode,
+        mailLogId,
+        investorPan: r.holderPan,
+        folioNumber: r.folioNumber,
+        amcCode: r.amcCode,
+        rawStructuredPayload: toJsonPayload(r),
+        idempotencyHash: hash([distributorId, r.folioNumber, r.holderPan, r.bankSlot, r.accountNumber]),
+      }));
+
+      for (let i = 0; i < normalized.length; i++) {
+        const r = normalized[i];
+        await upsertClientBankAccountFromRta({
+          distributorId,
+          arnProfileId,
+          investorPan: r.holderPan,
+          folioNumber: r.folioNumber,
+          amcCode: r.amcCode,
+          bankName: r.bankName ?? "Unknown",
+          accountNumber: r.accountNumber,
+          ifscCode: r.ifscCode,
+          idempotencyHash: rows[i].idempotencyHash,
+          mailLogId,
+        });
+      }
+      break;
+    }
+    case "NOMINEE_DETAILS": {
+      // Same fan-out shape as BANK_ACCOUNT_DETAILS — up to 10 nominees per source row.
+      const normalized = rawRecords.flatMap((raw) => mapNomineeDetailsRecords(raw));
+      const { distributorId, arnProfileId } = await resolveTenant(normalized, expectedDistributorId);
+      resolvedDistributorId = distributorId;
+      resolvedArnProfileId = arnProfileId;
+
+      rows = normalized.map((r) => ({
+        distributorId,
+        rtaType,
+        reportCode,
+        mailLogId,
+        investorPan: r.investorPan,
+        folioNumber: r.folioNumber,
+        amcCode: r.amcCode,
+        rawStructuredPayload: toJsonPayload(r),
+        idempotencyHash: hash([distributorId, r.folioNumber, r.investorPan, r.nomineeSlot, r.nomineeName]),
+      }));
+
+      for (let i = 0; i < normalized.length; i++) {
+        const r = normalized[i];
+        await upsertClientNomineeFromRta({
+          distributorId,
+          arnProfileId,
+          investorPan: r.investorPan,
+          folioNumber: r.folioNumber,
+          nomineeName: r.nomineeName ?? "Unknown",
+          nomineeRelation: r.nomineeRelation,
+          idempotencyHash: rows[i].idempotencyHash,
+          mailLogId,
         });
       }
       break;
@@ -464,6 +617,7 @@ async function runSchemaMapping(args: {
         distributorId,
         rtaType,
         reportCode,
+        mailLogId,
         investorPan: r.investorPan,
         folioNumber: r.folioNumber,
         amcCode: r.amcCode,
@@ -521,14 +675,15 @@ async function runSchemaMapping(args: {
             processedDate: r.processedDate,
             reportDate: r.reportDate,
             idempotencyHash: rows[i].idempotencyHash,
+            mailLogId,
           },
           update: {},
         });
       }
       break;
     }
-    case "SIP_EXPIRY": {
-      const normalized = rawRecords.map((raw) => mapSipExpiryRecord(raw));
+    case "BROKERAGE_EARNED": {
+      const normalized = rawRecords.map((raw) => mapBrokerageEarnedRecord(raw, rtaType));
       const { distributorId, arnProfileId } = await resolveTenant(normalized, expectedDistributorId);
       resolvedDistributorId = distributorId;
       resolvedArnProfileId = arnProfileId;
@@ -537,6 +692,81 @@ async function runSchemaMapping(args: {
         distributorId,
         rtaType,
         reportCode,
+        mailLogId,
+        investorPan: r.investorPan,
+        folioNumber: r.folioNumber,
+        amcCode: r.amcCode,
+        schemeCode: r.schemeCode,
+        transactionDate: r.transactionDate,
+        rawStructuredPayload: toJsonPayload(r),
+        // Same lesson as BrokerageWithheld's own hash — a folio can carry
+        // several separate fee-crediting rows for the same transaction
+        // across different periods, so processedDate/feeFromDate/
+        // feeToDate are part of the key, not just folio+transactionNumber.
+        idempotencyHash: hash([
+          distributorId,
+          r.folioNumber,
+          r.transactionNumber,
+          r.brokerageAmount,
+          r.feeFromDate?.toISOString(),
+          r.feeToDate?.toISOString(),
+          r.processedDate?.toISOString(),
+          r.transactionDate?.toISOString(),
+        ]),
+      }));
+
+      const folioIdCache = new Map<string, Promise<string | null>>();
+      for (let i = 0; i < normalized.length; i++) {
+        const r = normalized[i];
+        const cacheKey = `${r.amcCode ?? ""}|${r.folioNumber}`;
+        let folioIdPromise = folioIdCache.get(cacheKey);
+        if (!folioIdPromise) {
+          folioIdPromise = findFolioIdBestEffort(distributorId, r.folioNumber, r.amcCode);
+          folioIdCache.set(cacheKey, folioIdPromise);
+        }
+        const folioId = await folioIdPromise;
+        await prisma.brokerageEarned.upsert({
+          where: { idempotencyHash: rows[i].idempotencyHash },
+          create: {
+            distributorId,
+            arnProfileId,
+            folioId,
+            folioNumber: r.folioNumber,
+            transactionNumber: r.transactionNumber,
+            investorName: r.investorName,
+            investorPan: r.investorPan,
+            amcCode: r.amcCode,
+            schemeCode: r.schemeCode,
+            transactionType: r.transactionType,
+            units: r.units,
+            amount: r.amount,
+            brokerageRate: r.brokerageRate,
+            brokerageAmount: r.brokerageAmount,
+            feeType: r.feeType,
+            transactionDate: r.transactionDate,
+            feeFromDate: r.feeFromDate,
+            feeToDate: r.feeToDate,
+            processedDate: r.processedDate,
+            brokerArnCode: r.brokerArnCode,
+            idempotencyHash: rows[i].idempotencyHash,
+            mailLogId,
+          },
+          update: {},
+        });
+      }
+      break;
+    }
+    case "SIP_EXPIRY": {
+      const normalized = rawRecords.map((raw) => mapSipExpiryRecord(raw, rtaType));
+      const { distributorId, arnProfileId } = await resolveTenant(normalized, expectedDistributorId);
+      resolvedDistributorId = distributorId;
+      resolvedArnProfileId = arnProfileId;
+
+      rows = normalized.map((r) => ({
+        distributorId,
+        rtaType,
+        reportCode,
+        mailLogId,
         folioNumber: r.folioNumber,
         amcCode: r.amcCode,
         transactionDate: r.expiryDate,
@@ -581,6 +811,7 @@ async function runSchemaMapping(args: {
             expiryDate: r.expiryDate,
             taxStatus: r.taxStatus,
             idempotencyHash: rows[i].idempotencyHash,
+            mailLogId,
           },
           update: {},
         });

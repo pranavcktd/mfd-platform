@@ -5,5 +5,6 @@ import { ArnProfilesService } from "./arn-profiles.service";
 @Module({
   controllers: [ArnProfilesController],
   providers: [ArnProfilesService],
+  exports: [ArnProfilesService],
 })
 export class ArnProfilesModule {}

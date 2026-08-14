@@ -2,6 +2,7 @@ import { BadRequestException, Injectable } from "@nestjs/common";
 import { Prisma, prisma } from "@mfd/db";
 import { resolveAmcName } from "@mfd/shared";
 import { TenantContext } from "../tenant/tenant-context";
+import { monthlyEquivalentAmount } from "../reports/sip-frequency";
 
 export type MonthlyVolumeType = "purchase" | "redemption" | "other" | "all";
 
@@ -137,8 +138,13 @@ export class AnalysisService {
       valuationAmount: { not: null },
       ...(arnScope ? { arnProfileId: { in: arnScope } } : {}),
     };
+    // registrationType: "SIP" is required, not optional — real bug fixed
+    // 2026-08-12: before SipRegistration.registrationType existed, this
+    // blended active STP/SWP registrations in under "Active SIP Value" too.
+    // See reports.service.ts's getRegistrationReport doc comment.
     const sipWhere = {
       distributorId,
+      registrationType: "SIP" as const,
       isActive: true,
       ...(arnScope ? { folio: { arnProfileId: { in: arnScope } } } : {}),
     };
@@ -153,7 +159,7 @@ export class AnalysisService {
       totalAgg,
       topFolios,
       topClientRows,
-      activeSipAgg,
+      activeSips,
       arnRows,
       valuedFolioCount,
     ] = await Promise.all([
@@ -190,7 +196,7 @@ export class AnalysisService {
         orderBy: { _sum: { valuationAmount: "desc" } },
         take: 10,
       }),
-      prisma.sipRegistration.aggregate({ where: sipWhere, _sum: { sipAmount: true } }),
+      prisma.sipRegistration.findMany({ where: sipWhere, select: { sipAmount: true, frequency: true } }),
       // Only meaningful with >=2 ARNs on the account (parent + child) —
       // the frontend hides this card entirely for a single-ARN MFD.
       prisma.folio.groupBy({
@@ -272,7 +278,11 @@ export class AnalysisService {
           };
         })
         .sort((a, b) => Number(b.aum) - Number(a.aum)),
-      activeSipMonthlyValue: activeSipAgg._sum.sipAmount?.toString() ?? "0",
+      // Monthly-equivalent, not a raw sum — a quarterly SIP's full
+      // installment isn't "this month's" value (see monthlyEquivalentAmount).
+      activeSipMonthlyValue: activeSips
+        .reduce((sum, s) => sum + monthlyEquivalentAmount(Number(s.sipAmount ?? 0), s.frequency), 0)
+        .toFixed(2),
       valuedFolioCount,
     };
   }

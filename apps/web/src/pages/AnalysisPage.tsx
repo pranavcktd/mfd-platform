@@ -16,6 +16,7 @@ import {
   type MonthlyVolumeRow,
   type MonthlyVolumeType,
 } from "../hooks/useAnalysis";
+import { useRegistrationTypeBreakdown } from "../hooks/useReports";
 import { useArnProfiles } from "../hooks/useDashboard";
 import { formatCount, formatInrCompact, formatInrExact, formatMonthYear } from "../lib/format";
 
@@ -341,6 +342,67 @@ function MonthlyVolumeCard({ arnIds }: { arnIds: string[] }) {
   );
 }
 
+/**
+ * Active SIP/STP/SWP split — real registration data (WBR49/MFSD243), not
+ * inferred from transaction narration (see reports.service.ts's
+ * getRegistrationTypeBreakdown doc comment for why registration data is the
+ * only reliable signal, especially for SWP: real SWP mandates exist on this
+ * platform's data, but the redemptions they produce carry no distinguishing
+ * code or narration at all). Valued by monthly-equivalent amount, not raw
+ * count or raw sipAmount — puts a quarterly STP and a daily SIP on the same
+ * comparable footing (see monthlyEquivalentAmount).
+ */
+function RegistrationTypeCard({ arnIds }: { arnIds: string[] }) {
+  const { data, isLoading } = useRegistrationTypeBreakdown(arnIds);
+  const colorByType: Record<string, string> = { SIP: "--series-1", STP: "--series-2", SWP: "--series-3" };
+
+  const totalCount = data?.reduce((sum, r) => sum + r.count, 0) ?? 0;
+
+  return (
+    <Card title="SIP / STP / SWP Split">
+      {isLoading && <p className="text-sm text-ink-muted">Loading…</p>}
+      {data && totalCount === 0 && <p className="text-sm text-ink-muted">No active SIP/STP/SWP registrations yet.</p>}
+      {data && totalCount > 0 && (
+        <div className="flex flex-col items-center gap-4 sm:flex-row sm:items-start">
+          <PieChart
+            slices={data.map((r) => ({
+              id: r.registrationType,
+              label: r.registrationType,
+              value: Number(r.monthlyEquivalent),
+              colorVar: colorByType[r.registrationType] ?? "--gridline",
+            }))}
+            size={160}
+            formatValue={formatInrCompact}
+          />
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-xs text-ink-secondary">
+                <th className="py-1.5 pr-4 font-medium">Type</th>
+                <th className="py-1.5 pr-4 text-right font-medium">Active</th>
+                <th className="py-1.5 text-right font-medium">Monthly equiv.</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[var(--gridline)]">
+              {data.map((r) => (
+                <tr key={r.registrationType}>
+                  <td className="py-1.5 pr-4 text-ink">
+                    <span className="flex items-center gap-1.5">
+                      <span className="h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: `var(${colorByType[r.registrationType] ?? "--gridline"})` }} />
+                      {r.registrationType}
+                    </span>
+                  </td>
+                  <td className="py-1.5 pr-4 text-right tabular-nums text-ink-secondary">{formatCount(r.count)}</td>
+                  <td className="py-1.5 text-right tabular-nums text-ink"><Amount value={r.monthlyEquivalent} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 export function AnalysisPage() {
   const [selectedArnIds, setSelectedArnIds] = useState<string[]>([]);
   const { data: arnProfiles } = useArnProfiles();
@@ -424,6 +486,8 @@ export function AnalysisPage() {
             />
           )}
         </Card>
+
+        <RegistrationTypeCard arnIds={selectedArnIds} />
       </div>
 
       {data.arnSplit.length > 1 && (

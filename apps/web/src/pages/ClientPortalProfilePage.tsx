@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { Card } from "../components/ui/Card";
+import { PageLoading } from "../components/ui/PageLoading";
 import { useClientPortalChangePassword, useClientPortalMe } from "../hooks/useClientPortal";
 import { formatDate } from "../lib/format";
 import { ApiError } from "../lib/api-client";
@@ -93,7 +94,7 @@ export function ClientPortalProfilePage() {
   const { data, isLoading, isError } = useClientPortalMe();
 
   if (isLoading) {
-    return <p className="text-sm text-ink-secondary">Loading…</p>;
+    return <PageLoading />;
   }
   if (isError || !data) {
     return <p className="text-sm text-status-critical">Could not load your profile.</p>;

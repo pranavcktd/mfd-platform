@@ -1,8 +1,84 @@
 import { useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
+import { AlertTriangle } from "lucide-react";
 import { Card } from "../components/ui/Card";
-import { useDistributorList, useFolderImport } from "../hooks/useSuperAdmin";
+import { useDistributorList, useFolderImport, useFolderImportPreview, type FolderImportPreviewResult } from "../hooks/useSuperAdmin";
 import { ApiError } from "../lib/api-client";
+import { formatCount } from "../lib/format";
+
+function PreviewResultCard({ result }: { result: FolderImportPreviewResult }) {
+  const [expanded, setExpanded] = useState<"cams" | "kfintech" | "unrecognized" | null>(
+    result.unrecognizedCount > 0 ? "unrecognized" : null,
+  );
+
+  return (
+    <Card title="Preview Result">
+      <p className="mb-3 text-xs text-ink-muted">
+        Read-only — walked and classified {formatCount(result.totalFiles)} file(s) under this folder. Nothing was
+        decrypted, parsed, or queued.
+      </p>
+      <div className="grid grid-cols-3 gap-3 text-sm">
+        <button
+          onClick={() => setExpanded(expanded === "cams" ? null : "cams")}
+          className="rounded-lg border border-[var(--border)] p-3 text-left hover:bg-[var(--gridline)]/30"
+        >
+          <p className="text-xs text-ink-secondary">CAMS</p>
+          <p className="mt-1 text-lg font-semibold text-ink">{formatCount(result.camsCount)}</p>
+        </button>
+        <button
+          onClick={() => setExpanded(expanded === "kfintech" ? null : "kfintech")}
+          className="rounded-lg border border-[var(--border)] p-3 text-left hover:bg-[var(--gridline)]/30"
+        >
+          <p className="text-xs text-ink-secondary">KFintech</p>
+          <p className="mt-1 text-lg font-semibold text-ink">{formatCount(result.kfintechCount)}</p>
+        </button>
+        <button
+          onClick={() => setExpanded(expanded === "unrecognized" ? null : "unrecognized")}
+          className={`rounded-lg border p-3 text-left hover:bg-[var(--gridline)]/30 ${
+            result.unrecognizedCount > 0 ? "border-status-warning/40 bg-status-warning/5" : "border-[var(--border)]"
+          }`}
+        >
+          <p className="text-xs text-ink-secondary">Unrecognized</p>
+          <p className={`mt-1 text-lg font-semibold ${result.unrecognizedCount > 0 ? "text-status-warning" : "text-ink"}`}>
+            {formatCount(result.unrecognizedCount)}
+          </p>
+        </button>
+      </div>
+
+      {result.unrecognizedCount > 0 && expanded !== "unrecognized" && (
+        <p className="mt-3 flex items-center gap-1.5 text-xs text-status-warning">
+          <AlertTriangle size={13} /> {result.unrecognizedCount} file(s) won't be imported as-is — expand "Unrecognized" to see why.
+        </p>
+      )}
+
+      {expanded && (
+        <div className="mt-3 max-h-64 overflow-y-auto rounded-md border border-[var(--border)]">
+          {expanded === "unrecognized" ? (
+            <table className="w-full text-xs">
+              <tbody className="divide-y divide-[var(--gridline)]">
+                {result.unrecognizedFiles.map((f) => (
+                  <tr key={f.path}>
+                    <td className="px-2 py-1.5 font-mono text-ink-secondary">{f.path}</td>
+                    <td className="px-2 py-1.5 text-status-warning">{f.reason}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <ul className="divide-y divide-[var(--gridline)] text-xs">
+              {(expanded === "cams" ? result.camsFiles : result.kfintechFiles).map((f) => (
+                <li key={f} className="px-2 py-1.5 font-mono text-ink-secondary">{f}</li>
+              ))}
+            </ul>
+          )}
+          {(expanded === "cams" ? result.camsCount : expanded === "kfintech" ? result.kfintechCount : result.unrecognizedCount) > 200 && (
+            <p className="px-2 py-1.5 text-xs text-ink-muted">Showing first 200 — counts above are exact.</p>
+          )}
+        </div>
+      )}
+    </Card>
+  );
+}
 
 export function SuperAdminFolderImportPage() {
   const { data: distributors } = useDistributorList();
@@ -14,8 +90,18 @@ export function SuperAdminFolderImportPage() {
   const [error, setError] = useState<string | null>(null);
   const [triggered, setTriggered] = useState<{ jobId: string; triggeredAt: string } | null>(null);
   const folderImport = useFolderImport();
+  const preview = useFolderImportPreview();
 
   const selectedDistributor = distributors?.find((d) => d.id === distributorId);
+
+  async function handlePreview() {
+    setError(null);
+    try {
+      await preview.mutateAsync(folderPath);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not preview this folder");
+    }
+  }
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -48,6 +134,8 @@ export function SuperAdminFolderImportPage() {
       </div>
 
       {error && <p className="rounded-md bg-status-critical/10 px-3 py-2 text-sm text-status-critical">{error}</p>}
+
+      {preview.data && <PreviewResultCard result={preview.data} />}
 
       <form onSubmit={handleSubmit}>
         <Card title="Import Source">
@@ -91,16 +179,27 @@ export function SuperAdminFolderImportPage() {
             </div>
             <div>
               <label className="mb-1 block text-xs font-medium text-ink-secondary">Server Folder Path *</label>
-              <input
-                value={folderPath}
-                onChange={(e) => setFolderPath(e.target.value)}
-                required
-                placeholder={String.raw`e.g. D:\MFD_Project\basic data\data as on 17-07-2026`}
-                className="w-full rounded-md border border-[var(--border)] bg-surface px-3 py-2 font-mono text-sm text-ink outline-none focus:border-series-1"
-              />
+              <div className="flex gap-2">
+                <input
+                  value={folderPath}
+                  onChange={(e) => setFolderPath(e.target.value)}
+                  required
+                  placeholder={String.raw`e.g. D:\MFD_Project\basic data\since-inception-imports\ARN-91053\SinceInception_08-08-2026`}
+                  className="w-full rounded-md border border-[var(--border)] bg-surface px-3 py-2 font-mono text-sm text-ink outline-none focus:border-series-1"
+                />
+                <button
+                  type="button"
+                  onClick={handlePreview}
+                  disabled={!folderPath || preview.isPending}
+                  className="shrink-0 rounded-md border border-[var(--border)] px-3 py-2 text-sm font-medium text-ink-secondary hover:bg-[var(--gridline)]/50 disabled:opacity-50"
+                >
+                  {preview.isPending ? "Checking…" : "Preview"}
+                </button>
+              </div>
               <p className="mt-1 text-xs text-ink-muted">
                 A path on the server's own filesystem — not a browser upload. By default, zips are decrypted
-                using this MFD's stored KFintech/CAMS zip password from onboarding.
+                using this MFD's stored KFintech/CAMS zip password from onboarding. Use Preview first to check
+                the folder's structure — it's read-only, no decryption or import happens.
               </p>
             </div>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">

@@ -1,12 +1,14 @@
 import type { ReactNode } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
-import { LogOut, Users, UserPlus, MailCheck, FolderInput, Activity, ScrollText, Settings, LineChart, TrendingUp, Wrench } from "lucide-react";
+import { LogOut, Users, UserPlus, MailCheck, FolderInput, Activity, ScrollText, Settings, LineChart, TrendingUp, Wrench, Database, Mail } from "lucide-react";
 import { clearAdminKey } from "../../lib/admin-api-client";
 
 const NAV_ITEMS = [
   { label: "MFDs", path: "/super-admin", icon: Users },
   { label: "Onboard New MFD", path: "/super-admin/onboard", icon: UserPlus },
   { label: "Mail Sync", path: "/super-admin/mail-sync", icon: MailCheck },
+  { label: "RTA Mail Configuration", path: "/super-admin/rta-config", icon: Mail },
+  { label: "Imported Data Explorer", path: "/super-admin/imported-data", icon: Database },
   { label: "NAV Sync", path: "/super-admin/nav-sync", icon: TrendingUp },
   { label: "Data Quality", path: "/super-admin/data-quality", icon: Wrench },
   { label: "Since-Inception Import", path: "/super-admin/folder-import", icon: FolderInput },

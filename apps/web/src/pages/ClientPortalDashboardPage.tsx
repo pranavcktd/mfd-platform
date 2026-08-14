@@ -1,8 +1,23 @@
 import { Link } from "react-router-dom";
 import { Card } from "../components/ui/Card";
 import { Amount } from "../components/ui/Amount";
+import { GainLossStat } from "../components/ui/GainLossStat";
+import { PageLoading } from "../components/ui/PageLoading";
 import { useClientPortalMe } from "../hooks/useClientPortal";
 import { formatInrCompact, formatInrExact } from "../lib/format";
+
+/** Colors a %-return figure (XIRR/CAGR/absolute return) green/red the same way GainLossStat does for a rupee figure — null renders as a muted "—" rather than 0%, since "not enough data yet" and "exactly flat" are different things. */
+function ReturnPercent({ value }: { value: string | null }) {
+  if (value === null) return <span className="text-ink-muted">—</span>;
+  const n = Number(value);
+  const colorClass = n > 0.005 ? "text-status-good" : n < -0.005 ? "text-status-critical" : "text-ink-secondary";
+  return (
+    <span className={colorClass}>
+      {n > 0.005 ? "+" : ""}
+      {n.toFixed(2)}%
+    </span>
+  );
+}
 
 const SERIES_CLASSES = ["bg-series-1", "bg-series-2", "bg-series-3", "bg-series-4", "bg-series-5", "bg-series-6"];
 
@@ -10,7 +25,7 @@ export function ClientPortalDashboardPage() {
   const { data, isLoading, isError } = useClientPortalMe();
 
   if (isLoading) {
-    return <p className="text-sm text-ink-secondary">Loading…</p>;
+    return <PageLoading />;
   }
   if (isError || !data) {
     return <p className="text-sm text-status-critical">Could not load your portfolio.</p>;
@@ -30,11 +45,30 @@ export function ClientPortalDashboardPage() {
         )}
       </div>
 
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-6">
         <div className="rounded-lg border border-[var(--border)] bg-surface p-4">
-          <p className="text-xs text-ink-secondary">Total Portfolio Value</p>
-          <p className="mt-1 text-xl font-semibold text-ink">{formatInrCompact(data.totalAum)}</p>
-          <p className="text-xs text-ink-muted">{formatInrExact(data.totalAum)}</p>
+          <p className="text-xs text-ink-secondary">Current Value</p>
+          <p className="mt-1 text-xl font-semibold text-ink">{formatInrCompact(data.totalCurrentValue)}</p>
+          <p className="text-xs text-ink-muted">{formatInrExact(data.totalCurrentValue)}</p>
+        </div>
+        <div className="rounded-lg border border-[var(--border)] bg-surface p-4">
+          <p className="text-xs text-ink-secondary">Total Invested</p>
+          <p className="mt-1 text-xl font-semibold text-ink">{formatInrCompact(data.totalInvestedValue)}</p>
+          <p className="text-xs text-ink-muted">{formatInrExact(data.totalInvestedValue)}</p>
+        </div>
+        <div className="rounded-lg border border-[var(--border)] bg-surface p-4">
+          <p className="text-xs text-ink-secondary">Gain / Loss</p>
+          <p className="mt-1 text-xl font-semibold">
+            <GainLossStat investedAmount={data.totalInvestedValue} currentValue={Number(data.totalCurrentValue)} />
+          </p>
+        </div>
+        <div className="rounded-lg border border-[var(--border)] bg-surface p-4">
+          <p className="text-xs text-ink-secondary">Absolute Return</p>
+          <p className="mt-1 text-xl font-semibold"><ReturnPercent value={data.absoluteReturnPercent} /></p>
+        </div>
+        <div className="rounded-lg border border-[var(--border)] bg-surface p-4" title="Annualized return, accounting for the timing of every purchase/redemption">
+          <p className="text-xs text-ink-secondary">XIRR</p>
+          <p className="mt-1 text-xl font-semibold"><ReturnPercent value={data.xirr} /></p>
         </div>
         <div className="rounded-lg border border-[var(--border)] bg-surface p-4">
           <p className="text-xs text-ink-secondary">Folios</p>

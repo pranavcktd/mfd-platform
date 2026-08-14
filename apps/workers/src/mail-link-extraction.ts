@@ -1,6 +1,12 @@
 export type RtaSender = "CAMS" | "KFINTECH";
 
-const SENDER_DOMAINS: Record<RtaSender, string> = {
+/**
+ * Fallback only — the real, live values come from the rta_sender_config
+ * table (editable in Super Admin, see rta-config.service.ts) so a future
+ * CAMS/KFintech sending-address change doesn't need a code change +
+ * deploy. Used here only if the DB table is somehow empty/unreachable.
+ */
+export const DEFAULT_SENDER_DOMAINS: Record<RtaSender, string> = {
   CAMS: "camsonline.com",
   KFINTECH: "kfintech.com",
 };
@@ -61,11 +67,11 @@ const REPORT_SUBJECT_GATE: Partial<Record<RtaSender, RegExp>> = {
   KFINTECH: /report for ref/i,
 };
 
-/** Identifies which RTA sent an email, from its From: address. Returns null for anything else — mail-ingestion should skip those. */
-export function identifyRtaSender(fromAddress: string): RtaSender | null {
+/** Identifies which RTA sent an email, from its From: address. Returns null for anything else — mail-ingestion should skip those. senderDomains defaults to the hardcoded fallback; real callers pass the live DB-configured values (see rta-sender-config.ts). */
+export function identifyRtaSender(fromAddress: string, senderDomains: Record<RtaSender, string> = DEFAULT_SENDER_DOMAINS): RtaSender | null {
   const lower = fromAddress.toLowerCase();
-  for (const [rta, domain] of Object.entries(SENDER_DOMAINS) as [RtaSender, string][]) {
-    if (lower.includes(domain)) {
+  for (const [rta, domain] of Object.entries(senderDomains) as [RtaSender, string][]) {
+    if (domain && lower.includes(domain)) {
       return rta;
     }
   }

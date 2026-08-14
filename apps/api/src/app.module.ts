@@ -21,6 +21,8 @@ import { ImportExternalModule } from "./import-external/import-external.module";
 import { EquityIsinMasterModule } from "./equity-isin-master/equity-isin-master.module";
 import { NavModule } from "./nav/nav.module";
 import { DataQualityModule } from "./data-quality/data-quality.module";
+import { RtaConfigModule } from "./rta-config/rta-config.module";
+import { MarketDataModule } from "./market-data/market-data.module";
 
 @Module({
   imports: [
@@ -43,6 +45,8 @@ import { DataQualityModule } from "./data-quality/data-quality.module";
     EquityIsinMasterModule,
     NavModule,
     DataQualityModule,
+    RtaConfigModule,
+    MarketDataModule,
   ],
   controllers: [HealthController],
   providers: [TenantMiddleware, ClientAuthMiddleware],

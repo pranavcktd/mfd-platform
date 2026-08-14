@@ -5,6 +5,7 @@ import {
   useAddBankAccount,
   useAddNominee,
   useClientDetail,
+  useClientSystematicInvestments,
   useClientTransactions,
   useCreatePortalLogin,
   useDisablePortalLogin,
@@ -24,6 +25,7 @@ import { OtherAssetValue } from "../components/ui/OtherAssetValue";
 import { SearchBox } from "../components/ui/SearchBox";
 import { Pager } from "../components/ui/Pager";
 import { FolioHoldingsExplorer } from "../components/holdings/FolioHoldingsExplorer";
+import { SystematicInvestmentsExplorer } from "../components/holdings/SystematicInvestmentsExplorer";
 import { formatDate, formatInrCompact, formatInrExact } from "../lib/format";
 
 function NomineeSection({ clientId, nominees }: { clientId: string; nominees: ClientNominee[] }) {
@@ -226,6 +228,12 @@ function PortalLoginSection({
   );
 }
 
+/** Thin wrapper wiring the CRM's own client-scoped hook into the shared explorer component (also used by the client portal, scoped to "yourself" there instead). */
+function SystematicInvestmentsSection({ clientId }: { clientId: string }) {
+  const { data, isLoading } = useClientSystematicInvestments(clientId);
+  return <SystematicInvestmentsExplorer registrations={data} isLoading={isLoading} />;
+}
+
 function MergeSection({ clientId }: { clientId: string }) {
   const [open, setOpen] = useState(false);
   const [targetId, setTargetId] = useState<string | undefined>();
@@ -280,8 +288,18 @@ export function ClientDetailPage() {
     return <p className="text-sm text-status-critical">Client not found.</p>;
   }
 
-  const totalAum = data.folios.reduce((sum, f) => sum + Number(f.valuationAmount ?? 0), 0);
-  const totalInvested = data.folios.reduce((sum, f) => sum + Number(f.investedAmount ?? 0), 0);
+  // Backend-computed (crm.service.ts's getClientDetail) — NOT re-derived
+  // here from data.folios, since a naive client-side sum of
+  // valuationAmount alone silently drops any folio that's never received
+  // an RTA balance report yet (real confirmed case, 2026-08-09) even
+  // though it has a real estimated current value sitting right there on
+  // the same folio object.
+  const totalAum = Number(data.totalCurrentValue);
+  const totalInvested = Number(data.totalInvestedValue);
+  const gain = Number(data.gain);
+  const absoluteReturnPercent = data.absoluteReturnPercent !== null ? Number(data.absoluteReturnPercent) : null;
+  const xirr = data.xirr !== null ? Number(data.xirr) : null;
+  const cagr = data.cagr !== null ? Number(data.cagr) : null;
   const address = [data.address1, data.address2, data.city, data.pincode].filter(Boolean).join(", ");
 
   return (
@@ -303,7 +321,7 @@ export function ClientDetailPage() {
         </p>
       </div>
 
-      <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-6">
         <div className="rounded-lg border border-[var(--border)] bg-surface p-4">
           <p className="text-xs text-ink-secondary">Total AUM (Current Value)</p>
           <p className="mt-1 text-xl font-semibold text-ink">{formatInrCompact(totalAum)}</p>
@@ -314,6 +332,39 @@ export function ClientDetailPage() {
           <p className="mt-1 text-xl font-semibold text-ink">{formatInrCompact(totalInvested)}</p>
           <p className="text-xs text-ink-muted">{formatInrExact(totalInvested)}</p>
         </div>
+        <div className="rounded-lg border border-[var(--border)] bg-surface p-4">
+          <p className="text-xs text-ink-secondary">Overall Gain</p>
+          <p className={`mt-1 text-xl font-semibold ${gain >= 0 ? "text-status-good" : "text-status-critical"}`}>
+            {gain >= 0 ? "+" : ""}{formatInrCompact(gain)}
+          </p>
+          <p className="text-xs text-ink-muted">{formatInrExact(gain)}</p>
+        </div>
+        <div className="rounded-lg border border-[var(--border)] bg-surface p-4">
+          <p className="text-xs text-ink-secondary">Absolute Return</p>
+          <p className={`mt-1 text-xl font-semibold ${absoluteReturnPercent === null ? "text-ink-muted" : absoluteReturnPercent >= 0 ? "text-status-good" : "text-status-critical"}`}>
+            {absoluteReturnPercent !== null ? `${absoluteReturnPercent >= 0 ? "+" : ""}${absoluteReturnPercent.toFixed(2)}%` : "—"}
+          </p>
+          <p className="text-xs text-ink-muted">since inception</p>
+        </div>
+        <div className="rounded-lg border border-[var(--border)] bg-surface p-4">
+          <p className="text-xs text-ink-secondary">XIRR (Annualized)</p>
+          <p className={`mt-1 text-xl font-semibold ${xirr === null ? "text-ink-muted" : xirr >= 0 ? "text-status-good" : "text-status-critical"}`}>
+            {xirr !== null ? `${xirr >= 0 ? "+" : ""}${xirr.toFixed(2)}%` : "—"}
+          </p>
+          <p className="text-xs text-ink-muted">{xirr === null ? "not enough cash flows" : "money-weighted"}</p>
+        </div>
+        <div className="rounded-lg border border-[var(--border)] bg-surface p-4">
+          <p className="text-xs text-ink-secondary">CAGR</p>
+          <p className={`mt-1 text-xl font-semibold ${cagr === null ? "text-ink-muted" : cagr >= 0 ? "text-status-good" : "text-status-critical"}`}>
+            {cagr !== null ? `${cagr >= 0 ? "+" : ""}${cagr.toFixed(2)}%` : "—"}
+          </p>
+          <p className="text-xs text-ink-muted" title="Treats total invested as a lump sum from the first purchase date — exact for a single purchase, approximate for SIP/multiple purchases. Prefer XIRR for accuracy.">
+            {cagr === null ? "no purchases yet" : "approx., see XIRR"}
+          </p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-3">
         <div className="rounded-lg border border-[var(--border)] bg-surface p-4">
           <p className="text-xs text-ink-secondary">Folios</p>
           <p className="mt-1 text-xl font-semibold text-ink">{data.folios.length}</p>
@@ -384,6 +435,8 @@ export function ClientDetailPage() {
           useTransactions={(folioId) => useFolioTransactions(data.id, folioId)}
         />
       </Card>
+
+      <SystematicInvestmentsSection clientId={data.id} />
 
       <Card title="Other Assets">
         <ul className="divide-y divide-[var(--gridline)]">

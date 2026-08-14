@@ -1,5 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { apiClient } from "../lib/api-client";
+import type { CapitalGainRow, CapitalGainLotRow } from "../lib/holdings-types";
+export type { CapitalGainRow, CapitalGainLotRow };
 
 export interface AumRow {
   amcCode: string;
@@ -31,6 +33,7 @@ export interface SipRow {
   folioNumber: string;
   amcCode: string;
   schemeCode: string | null;
+  schemeName: string | null;
   sipAmount: string | null;
   frequency: string | null;
   registrationDate: string;
@@ -189,28 +192,6 @@ export function useCasReport(page: number, arnProfileIds?: string[]) {
   });
 }
 
-export interface CapitalGainRow {
-  folioId: string;
-  clientId: string;
-  clientName: string;
-  folioNumber: string;
-  schemeName: string | null;
-  taxCategory: "EQUITY" | "DEBT_OR_OTHER";
-  stcgGain: string;
-  ltcgGain: string;
-  /** Null when the correct rate depends on the investor's income slab (debt-fund gains) rather than a flat statutory rate. */
-  estimatedTax: string | null;
-  /** Sum of gain where estimatedTax couldn't be computed (taxed at the investor's own slab rate). */
-  taxNotComputableGain: string;
-  /** True if any lot was purchased before Jan 31, 2018 and is eligible for equity grandfathering (Section 112A cost-basis floor). */
-  grandfatheringNote: boolean;
-  /** True if grandfathering was actually applied using a real backfilled Jan 31, 2018 NAV — false means the eligible lot's gain is still overstated pending a NAV backfill. */
-  grandfatheringApplied: boolean;
-  /** Only meaningful for the unrealized report — whether currentValue used today's live AMFI NAV or fell back to the RTA's own snapshot. */
-  valuationSource?: "RTA" | "LIVE_NAV";
-  asOfOrDate: string | null;
-}
-
 export interface CapitalGainsFilters {
   type: "realized" | "notional";
   arnProfileIds?: string[];
@@ -241,27 +222,6 @@ export function useCapitalGainsReport(filters: CapitalGainsFilters, enabled: boo
       ),
     enabled,
   });
-}
-
-export interface CapitalGainLotRow {
-  folioId: string;
-  clientId: string;
-  clientName: string;
-  folioNumber: string;
-  schemeName: string | null;
-  taxCategory: "EQUITY" | "DEBT_OR_OTHER";
-  purchaseDate: string;
-  /** Null for the notional (unrealized) report — a still-held lot has no sale date. */
-  saleDate: string | null;
-  units: string;
-  costBasis: string;
-  saleProceeds: string;
-  gain: string;
-  holdingDays: number;
-  classification: "STCG" | "LTCG";
-  estimatedTax: string | null;
-  grandfatheringApplicable: boolean;
-  grandfatheringApplied: boolean;
 }
 
 /**
@@ -347,6 +307,55 @@ export function useSipDueReport(arnProfileIds?: string[], withinDays?: number) {
   });
 }
 
+export interface SipFrequencyBucket {
+  frequency: string;
+  count: number;
+  totalAmount: string;
+  monthlyEquivalent: string;
+}
+
+export interface SipBreakdown {
+  totalCount: number;
+  /** Raw sum of every active registration's amount regardless of frequency — the figure the dashboard used to show alone, mixing cadences. */
+  totalRawAmount: string;
+  /** The comparable "what to expect this month" figure — quarterly/weekly/etc normalized onto a monthly basis. */
+  totalMonthlyEquivalent: string;
+  byFrequency: SipFrequencyBucket[];
+}
+
+export function useSipBreakdown(arnProfileIds?: string[]) {
+  return useQuery({
+    queryKey: ["reports-sip-breakdown", arnProfileIds],
+    queryFn: () => apiClient.get<SipBreakdown>(`/reports/distributor/sip-breakdown${buildQuery({ arnProfileIds: arnQueryValue(arnProfileIds) })}`),
+  });
+}
+
+export interface SipExplorerRow {
+  id: string;
+  clientId: string;
+  clientName: string;
+  amcCode: string;
+  amcName: string;
+  schemeName: string | null;
+  folioNumber: string;
+  sipAmount: string | null;
+  frequency: string | null;
+  startDate: string | null;
+  endDate: string | null;
+  registrationDate: string;
+  ceaseDate: string | null;
+  isActive: boolean;
+  estimatedNextDueDate: string | null;
+}
+
+/** Flat SIP/STP registration data — the frontend builds both the AMC->Scheme->Client and Client->Scheme groupings from this one list. */
+export function useSipExplorer(arnProfileIds?: string[]) {
+  return useQuery({
+    queryKey: ["reports-sip-explorer", arnProfileIds],
+    queryFn: () => apiClient.get<SipExplorerRow[]>(`/reports/distributor/sip-explorer${buildQuery({ arnProfileIds: arnQueryValue(arnProfileIds) })}`),
+  });
+}
+
 export interface SipExpiringRow {
   id: string;
   clientName: string;
@@ -362,30 +371,50 @@ export function useSipExpiringReport(arnProfileIds?: string[], withinDays?: numb
   });
 }
 
-export interface SwitchTransactionRow {
-  id: string;
-  clientName: string;
-  folioNumber: string;
-  schemeName: string | null;
-  transactionType: string;
-  transactionDate: string;
-  amount: string | null;
-  units: string | null;
-}
+/**
+ * STP/SWP registrations — real mandate data direct from
+ * SipRegistration.registrationType (WBR49/MFSD243), not derived from
+ * transaction history. Same row shape as SipRow/useSipReport (both are the
+ * same underlying report, just type-scoped), kept as a separate named type
+ * only because "SwitchTransactionRow" was already in use by callers.
+ */
+export type SwitchTransactionRow = SipRow;
 
-export function useStpReport(page: number, arnProfileIds?: string[]) {
+export function useStpReport(page: number, status?: "new" | "active" | "ceased", arnProfileIds?: string[]) {
   return useQuery({
-    queryKey: ["reports-stp", page, arnProfileIds],
+    queryKey: ["reports-stp", page, status, arnProfileIds],
     queryFn: () =>
-      apiClient.get<Paginated & { transactions: SwitchTransactionRow[] }>(`/reports/distributor/stp${buildQuery({ page, arnProfileIds: arnQueryValue(arnProfileIds) })}`),
+      apiClient.get<Paginated & { sips: SipRow[] }>(
+        `/reports/distributor/stp${buildQuery({ page, status, arnProfileIds: arnQueryValue(arnProfileIds) })}`,
+      ),
   });
 }
 
-export function useSwpReport(page: number, arnProfileIds?: string[]) {
+export function useSwpReport(page: number, status?: "new" | "active" | "ceased", arnProfileIds?: string[]) {
   return useQuery({
-    queryKey: ["reports-swp", page, arnProfileIds],
+    queryKey: ["reports-swp", page, status, arnProfileIds],
     queryFn: () =>
-      apiClient.get<Paginated & { transactions: SwitchTransactionRow[] }>(`/reports/distributor/swp${buildQuery({ page, arnProfileIds: arnQueryValue(arnProfileIds) })}`),
+      apiClient.get<Paginated & { sips: SipRow[] }>(
+        `/reports/distributor/swp${buildQuery({ page, status, arnProfileIds: arnQueryValue(arnProfileIds) })}`,
+      ),
+  });
+}
+
+export interface RegistrationTypeBreakdownRow {
+  registrationType: string;
+  count: number;
+  totalAmount: string;
+  monthlyEquivalent: string;
+}
+
+/** Active SIP/STP/SWP split, for the Analysis page's registration-type breakdown card. */
+export function useRegistrationTypeBreakdown(arnProfileIds?: string[]) {
+  return useQuery({
+    queryKey: ["reports-registration-type-breakdown", arnProfileIds],
+    queryFn: () =>
+      apiClient.get<RegistrationTypeBreakdownRow[]>(
+        `/reports/distributor/registration-type-breakdown${buildQuery({ arnProfileIds: arnQueryValue(arnProfileIds) })}`,
+      ),
   });
 }
 

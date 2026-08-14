@@ -1,12 +1,13 @@
 import type { ReactNode } from "react";
 import { NavLink } from "react-router-dom";
-import { LayoutDashboard, Wallet, ArrowLeftRight, UserCircle, LogOut } from "lucide-react";
+import { LayoutDashboard, Wallet, ArrowLeftRight, Receipt, UserCircle, LogOut, TrendingUp } from "lucide-react";
 import { useClientPortalLogout, useClientPortalMe } from "../../hooks/useClientPortal";
 
 const NAV_ITEMS = [
   { label: "Overview", path: "/client-portal", icon: LayoutDashboard, end: true },
   { label: "Holdings", path: "/client-portal/holdings", icon: Wallet, end: false },
   { label: "Transactions", path: "/client-portal/transactions", icon: ArrowLeftRight, end: false },
+  { label: "Capital Gains", path: "/client-portal/capital-gains", icon: Receipt, end: false },
   { label: "Profile", path: "/client-portal/profile", icon: UserCircle, end: false },
 ];
 
@@ -17,8 +18,11 @@ export function ClientPortalShell({ children }: { children: ReactNode }) {
   return (
     <div className="flex min-h-screen bg-page text-ink">
       <aside className="flex w-60 shrink-0 flex-col border-r border-[var(--border)] bg-surface">
-        <div className="flex h-14 items-center px-5 text-sm font-semibold tracking-wide text-ink">
-          Investor Portal
+        <div className="flex h-14 items-center gap-2.5 px-5">
+          <div className="rounded-md bg-series-1/10 p-1.5">
+            <TrendingUp size={16} className="text-series-1" strokeWidth={2.5} />
+          </div>
+          <span className="text-sm font-semibold tracking-wide text-ink">Investor Portal</span>
         </div>
         <nav className="flex-1 space-y-0.5 px-2 py-2">
           {NAV_ITEMS.map((item) => (

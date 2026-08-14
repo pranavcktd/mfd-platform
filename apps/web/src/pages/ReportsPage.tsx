@@ -17,6 +17,7 @@ import {
   useNetWorthReport,
   useSipDueReport,
   useSipExpiringReport,
+  useSipExplorer,
   useSipReport,
   useSipStpExpiringCamsReport,
   useStpReport,
@@ -26,23 +27,29 @@ import {
   type CapitalGainRow,
   type CapitalGainLotRow,
   type ClientReturnRow,
+  type SipExplorerRow,
 } from "../hooks/useReports";
 import { useArnProfiles } from "../hooks/useDashboard";
 import { useClientList, useClientDetail, useFolioTransactions, type ClientFolio } from "../hooks/useCrm";
 import { FolioHoldingsExplorer } from "../components/holdings/FolioHoldingsExplorer";
+import { CapitalGainsResultsTable, CapitalGainsLotDetailTable } from "../components/holdings/CapitalGainsTables";
 import { Amount } from "../components/ui/Amount";
+import { GainLossStat } from "../components/ui/GainLossStat";
 import { Pager } from "../components/ui/Pager";
 import { ArnFilter } from "../components/ui/ArnFilter";
 import { SearchBox } from "../components/ui/SearchBox";
 import { PrintableModal } from "../components/ui/PrintableModal";
 import { downloadCsv, downloadXlsx } from "../lib/export";
 import { formatCount, formatDate } from "../lib/format";
+import { effectiveCurrentValue } from "../lib/holdings-types";
+import { formatFrequencyLabel } from "../lib/sip-frequency-labels";
+import { financialYearOptions } from "../lib/financial-year";
 
 type Section = "client" | "distributor";
 type ClientTab = "capital-gains" | "notional-gains" | "holdings" | "net-worth" | "family-allocation" | "valuation" | "cas";
 type DistributorTab =
   | "aum" | "business-development" | "dividend" | "sip-addition" | "sip-bounced" | "sip-ceased"
-  | "sip-due" | "sip-expiring" | "sip-stp-expiring-cams" | "stp" | "swp" | "brokerage-withheld"
+  | "sip-due" | "sip-expiring" | "sip-stp-expiring-cams" | "sip-explorer" | "stp" | "swp" | "brokerage-withheld"
   | "transactions" | "transaction-summary" | "client-returns";
 
 const CLIENT_TABS: Array<{ id: ClientTab; label: string }> = [
@@ -65,6 +72,7 @@ const DISTRIBUTOR_TABS: Array<{ id: DistributorTab; label: string }> = [
   { id: "sip-due", label: "SIP Due Report" },
   { id: "sip-expiring", label: "SIP Expiring Report" },
   { id: "sip-stp-expiring-cams", label: "SIP/STP Expiring (CAMS)" },
+  { id: "sip-explorer", label: "SIP Explorer" },
   { id: "stp", label: "STP Report" },
   { id: "swp", label: "SWP Report" },
   { id: "brokerage-withheld", label: "Brokerage Withheld" },
@@ -86,33 +94,6 @@ interface TabProps {
 }
 
 // --- Client reports ---
-
-interface FinancialYearOption {
-  key: string;
-  label: string;
-  startDate: string;
-  endDate: string;
-}
-
-/** April 1 - March 31 — only offers FYs that actually overlap the client's real transaction history, not a fixed hardcoded list. */
-function financialYearOptions(minDate: string | null | undefined, maxDate: string | null | undefined): FinancialYearOption[] {
-  if (!minDate || !maxDate) return [];
-  const min = new Date(minDate);
-  const max = new Date(maxDate);
-  const fyStartYear = (d: Date) => (d.getUTCMonth() >= 3 ? d.getUTCFullYear() : d.getUTCFullYear() - 1);
-  const minYear = fyStartYear(min);
-  const maxYear = fyStartYear(max);
-  const options: FinancialYearOption[] = [];
-  for (let y = maxYear; y >= minYear; y--) {
-    options.push({
-      key: String(y),
-      label: `FY ${y}-${String(y + 1).slice(2)}`,
-      startDate: `${y}-04-01`,
-      endDate: `${y + 1}-03-31`,
-    });
-  }
-  return options;
-}
 
 function ClientPicker({
   clientId,
@@ -175,113 +156,6 @@ function ClientPicker({
   );
 }
 
-function CapitalGainsResultsTable({ data }: { data: CapitalGainRow[] }) {
-  return (
-    <table className="w-full text-sm">
-      <thead>
-        <tr className="text-left text-xs text-ink-secondary">
-          <th className="py-1.5 pr-4 font-medium">Folio / Scheme</th>
-          <th className="py-1.5 pr-4 font-medium">Category</th>
-          <th className="py-1.5 pr-4 text-right font-medium">STCG</th>
-          <th className="py-1.5 pr-4 text-right font-medium">LTCG</th>
-          <th className="py-1.5 text-right font-medium">Est. Tax</th>
-        </tr>
-      </thead>
-      <tbody className="divide-y divide-[var(--gridline)]">
-        {data.length === 0 && <tr><td colSpan={5} className="py-4 text-center text-ink-muted">No data for this selection.</td></tr>}
-        {data.map((r) => (
-          <tr key={r.folioId}>
-            <td className="py-1.5 pr-4 text-ink-secondary">
-              {r.folioNumber} · {r.schemeName ?? "—"}
-              {r.grandfatheringNote && !r.grandfatheringApplied && (
-                <span
-                  className="ml-1.5 rounded bg-status-warning/15 px-1.5 py-0.5 text-[10px] font-medium text-status-warning"
-                  title="Includes a lot purchased before Jan 31, 2018 — grandfathering not applied (no backfilled 2018-01-31 NAV for this scheme yet), gain overstated for that lot"
-                >
-                  pre-2018 lot
-                </span>
-              )}
-              {r.grandfatheringApplied && (
-                <span
-                  className="ml-1.5 rounded bg-status-good/15 px-1.5 py-0.5 text-[10px] font-medium text-status-good"
-                  title="Grandfathering cost-basis floor applied using the real Jan 31, 2018 AMFI NAV"
-                >
-                  grandfathered
-                </span>
-              )}
-              {r.valuationSource === "LIVE_NAV" && (
-                <span className="ml-1.5 rounded bg-series-6/15 px-1.5 py-0.5 text-[10px] font-medium text-series-6" title="Current value uses today's live AMFI NAV">
-                  live NAV
-                </span>
-              )}
-            </td>
-            <td className="py-1.5 pr-4 text-ink-secondary">{r.taxCategory === "EQUITY" ? "Equity" : "Debt / Other"}</td>
-            <td className={`py-1.5 pr-4 text-right tabular-nums ${Number(r.stcgGain) >= 0 ? "text-status-good" : "text-status-critical"}`}>
-              <Amount value={r.stcgGain} />
-            </td>
-            <td className={`py-1.5 pr-4 text-right tabular-nums ${Number(r.ltcgGain) >= 0 ? "text-status-good" : "text-status-critical"}`}>
-              <Amount value={r.ltcgGain} />
-            </td>
-            <td className="py-1.5 text-right tabular-nums text-ink">
-              {r.estimatedTax !== null ? <Amount value={r.estimatedTax} /> : <span className="text-ink-muted" title="Taxed at your income slab rate — not computable here">at slab rate</span>}
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  );
-}
-
-/** One row per FIFO lot — the line-by-line detail an actual ITR Schedule 112A/CG filing needs, not a folio-level summary. */
-function CapitalGainsLotDetailTable({ data, notional }: { data: CapitalGainLotRow[]; notional: boolean }) {
-  return (
-    <table className="w-full text-sm">
-      <thead>
-        <tr className="text-left text-xs text-ink-secondary">
-          <th className="py-1.5 pr-4 font-medium">Folio / Scheme</th>
-          <th className="py-1.5 pr-4 font-medium">Acquisition Date</th>
-          {!notional && <th className="py-1.5 pr-4 font-medium">Sale Date</th>}
-          <th className="py-1.5 pr-4 text-right font-medium">Units</th>
-          <th className="py-1.5 pr-4 text-right font-medium">Cost</th>
-          <th className="py-1.5 pr-4 text-right font-medium">{notional ? "Current Value" : "Sale Value"}</th>
-          <th className="py-1.5 pr-4 text-right font-medium">Gain/Loss</th>
-          <th className="py-1.5 pr-4 font-medium">Holding (days)</th>
-          <th className="py-1.5 pr-4 font-medium">Type</th>
-          <th className="py-1.5 text-right font-medium">Est. Tax</th>
-        </tr>
-      </thead>
-      <tbody className="divide-y divide-[var(--gridline)]">
-        {data.length === 0 && <tr><td colSpan={10} className="py-4 text-center text-ink-muted">No data for this selection.</td></tr>}
-        {data.map((r, i) => (
-          <tr key={`${r.folioId}-${i}`}>
-            <td className="py-1.5 pr-4 text-ink-secondary">
-              {r.folioNumber} · {r.schemeName ?? "—"}
-              {r.grandfatheringApplied && (
-                <span className="ml-1.5 rounded bg-status-good/15 px-1.5 py-0.5 text-[10px] font-medium text-status-good" title="Grandfathering cost-basis floor applied (real Jan 31, 2018 AMFI NAV)">
-                  grandfathered
-                </span>
-              )}
-            </td>
-            <td className="py-1.5 pr-4 text-ink-secondary">{formatDate(r.purchaseDate)}</td>
-            {!notional && <td className="py-1.5 pr-4 text-ink-secondary">{r.saleDate ? formatDate(r.saleDate) : "—"}</td>}
-            <td className="py-1.5 pr-4 text-right tabular-nums text-ink-secondary">{r.units}</td>
-            <td className="py-1.5 pr-4 text-right tabular-nums text-ink-secondary"><Amount value={r.costBasis} /></td>
-            <td className="py-1.5 pr-4 text-right tabular-nums text-ink-secondary"><Amount value={r.saleProceeds} /></td>
-            <td className={`py-1.5 pr-4 text-right tabular-nums ${Number(r.gain) >= 0 ? "text-status-good" : "text-status-critical"}`}>
-              <Amount value={r.gain} />
-            </td>
-            <td className="py-1.5 pr-4 text-ink-secondary">{r.holdingDays}</td>
-            <td className="py-1.5 pr-4 text-ink-secondary">{r.classification}</td>
-            <td className="py-1.5 text-right tabular-nums text-ink">
-              {r.estimatedTax !== null ? <Amount value={r.estimatedTax} /> : <span className="text-ink-muted" title="Taxed at your income slab rate — not computable here">at slab rate</span>}
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  );
-}
-
 function CapitalGainsTab({ notional, arnIds }: { notional: boolean } & TabProps) {
   const [clientId, setClientId] = useState<string | null>(null);
   const [clientName, setClientName] = useState<string | null>(null);
@@ -327,17 +201,17 @@ function CapitalGainsTab({ notional, arnIds }: { notional: boolean } & TabProps)
       const rows = data as CapitalGainRow[];
       downloadCsv(
         `${exportBaseName}.csv`,
-        ["Folio", "Scheme", "Category", "STCG", "LTCG", "Estimated Tax", "Grandfathering Applied"],
-        rows.map((r) => [r.folioNumber, r.schemeName ?? "", r.taxCategory, r.stcgGain, r.ltcgGain, r.estimatedTax ?? "at slab rate", r.grandfatheringApplied ? "Yes" : "No"]),
+        ["Folio", "Scheme", "Category", "STCG", "LTCG", "Estimated Tax", "Grandfathering Applied", "History Gap"],
+        rows.map((r) => [r.folioNumber, r.schemeName ?? "", r.taxCategory, r.stcgGain, r.ltcgGain, r.estimatedTax ?? "at slab rate", r.grandfatheringApplied ? "Yes" : "No", r.hasIncompleteHistory ? `Yes (₹${r.incompleteHistoryGain})` : "No"]),
       );
     } else {
       const rows = data as CapitalGainLotRow[];
       downloadCsv(
         `${exportBaseName}.csv`,
-        ["Folio", "Scheme", "Category", "Acquisition Date", "Sale Date", "Units", "Cost", notional ? "Current Value" : "Sale Value", "Gain/Loss", "Holding Days", "Type", "Estimated Tax", "Grandfathering Applied"],
+        ["Folio", "Scheme", "Category", "Acquisition Date", "Sale Date", "Units", "Cost", notional ? "Current Value" : "Sale Value", "Gain/Loss", "Holding Days", "Type", "Estimated Tax", "Grandfathering Applied", "No Purchase Found"],
         rows.map((r) => [
           r.folioNumber, r.schemeName ?? "", r.taxCategory, formatDate(r.purchaseDate), r.saleDate ? formatDate(r.saleDate) : "",
-          r.units, r.costBasis, r.saleProceeds, r.gain, r.holdingDays, r.classification, r.estimatedTax ?? "at slab rate", r.grandfatheringApplied ? "Yes" : "No",
+          r.units, r.costBasis, r.saleProceeds, r.gain, r.holdingDays, r.classification, r.estimatedTax ?? "at slab rate", r.grandfatheringApplied ? "Yes" : "No", r.costBasisUnknown ? "Yes" : "No",
         ]),
       );
     }
@@ -349,18 +223,18 @@ function CapitalGainsTab({ notional, arnIds }: { notional: boolean } & TabProps)
       downloadXlsx(
         `${exportBaseName}.xlsx`,
         "Capital Gains",
-        ["Folio", "Scheme", "Category", "STCG", "LTCG", "Estimated Tax", "Grandfathering Applied"],
-        rows.map((r) => [r.folioNumber, r.schemeName ?? "", r.taxCategory, r.stcgGain, r.ltcgGain, r.estimatedTax ?? "at slab rate", r.grandfatheringApplied ? "Yes" : "No"]),
+        ["Folio", "Scheme", "Category", "STCG", "LTCG", "Estimated Tax", "Grandfathering Applied", "History Gap"],
+        rows.map((r) => [r.folioNumber, r.schemeName ?? "", r.taxCategory, r.stcgGain, r.ltcgGain, r.estimatedTax ?? "at slab rate", r.grandfatheringApplied ? "Yes" : "No", r.hasIncompleteHistory ? `Yes (₹${r.incompleteHistoryGain})` : "No"]),
       );
     } else {
       const rows = data as CapitalGainLotRow[];
       downloadXlsx(
         `${exportBaseName}.xlsx`,
         "Capital Gains Detail",
-        ["Folio", "Scheme", "Category", "Acquisition Date", "Sale Date", "Units", "Cost", notional ? "Current Value" : "Sale Value", "Gain/Loss", "Holding Days", "Type", "Estimated Tax", "Grandfathering Applied"],
+        ["Folio", "Scheme", "Category", "Acquisition Date", "Sale Date", "Units", "Cost", notional ? "Current Value" : "Sale Value", "Gain/Loss", "Holding Days", "Type", "Estimated Tax", "Grandfathering Applied", "No Purchase Found"],
         rows.map((r) => [
           r.folioNumber, r.schemeName ?? "", r.taxCategory, formatDate(r.purchaseDate), r.saleDate ? formatDate(r.saleDate) : "",
-          r.units, r.costBasis, r.saleProceeds, r.gain, r.holdingDays, r.classification, r.estimatedTax ?? "at slab rate", r.grandfatheringApplied ? "Yes" : "No",
+          r.units, r.costBasis, r.saleProceeds, r.gain, r.holdingDays, r.classification, r.estimatedTax ?? "at slab rate", r.grandfatheringApplied ? "Yes" : "No", r.costBasisUnknown ? "Yes" : "No",
         ]),
       );
     }
@@ -445,6 +319,21 @@ function CapitalGainsTab({ notional, arnIds }: { notional: boolean } & TabProps)
 
       {!clientId && <p className="py-6 text-center text-sm text-ink-muted">Select a client to generate their capital gains report.</p>}
       {clientId && !generated && <p className="py-6 text-center text-sm text-ink-muted">Choose a financial year (or all available data) and click Generate Report.</p>}
+      {clientId && generated && data && data.length > 0 && (() => {
+        const incompleteRows = viewMode === "summary"
+          ? (data as CapitalGainRow[]).filter((r) => r.hasIncompleteHistory)
+          : [];
+        const incompleteLotCount = viewMode === "detail" ? (data as CapitalGainLotRow[]).filter((r) => r.costBasisUnknown).length : 0;
+        if (incompleteRows.length === 0 && incompleteLotCount === 0) return null;
+        const incompleteGainTotal = incompleteRows.reduce((sum, r) => sum + Number(r.incompleteHistoryGain), 0);
+        return (
+          <div className="mb-3 rounded-md border border-status-critical/30 bg-status-critical/5 p-2.5 text-xs text-status-critical">
+            {viewMode === "summary"
+              ? `${incompleteRows.length} folio(s) below have at least one sale with no matching purchase in the ingested history (₹${incompleteGainTotal.toFixed(2)} of gain shown is a placeholder) — look for the "history gap" badge. These figures should be treated as provisional until since-inception import completes.`
+              : `${incompleteLotCount} lot(s) below have no matching purchase in the ingested history (marked "no purchase found") — their cost/holding period/classification is a placeholder, not necessarily correct.`}
+          </div>
+        );
+      })()}
       {clientId && generated && (
         isLoading
           ? <p className="py-6 text-center text-sm text-ink-muted">Loading…</p>
@@ -482,20 +371,26 @@ function FolioExportTable({ folios }: { folios: ClientFolio[] }) {
           <th className="py-1.5 pr-4 text-right font-medium">Units</th>
           <th className="py-1.5 pr-4 text-right font-medium">NAV</th>
           <th className="py-1.5 pr-4 text-right font-medium">Invested</th>
-          <th className="py-1.5 text-right font-medium">Current Value</th>
+          <th className="py-1.5 pr-4 text-right font-medium">Current Value</th>
+          <th className="py-1.5 text-right font-medium">P&amp;L</th>
         </tr>
       </thead>
       <tbody className="divide-y divide-[var(--gridline)]">
-        {folios.length === 0 && <tr><td colSpan={7} className="py-4 text-center text-ink-muted">No folios.</td></tr>}
+        {folios.length === 0 && <tr><td colSpan={8} className="py-4 text-center text-ink-muted">No folios.</td></tr>}
         {folios.map((f) => (
           <tr key={f.id}>
             <td className="py-1.5 pr-4 text-ink-secondary">{f.amcName}</td>
             <td className="py-1.5 pr-4 text-ink-secondary">{f.folioNumber}</td>
             <td className="py-1.5 pr-4 text-ink-secondary">{f.schemeName ?? `${f.amcCode}/${f.schemeCode}`}</td>
-            <td className="py-1.5 pr-4 text-right tabular-nums text-ink-secondary">{f.balanceUnits ?? "—"}</td>
+            <td className="py-1.5 pr-4 text-right tabular-nums text-ink-secondary">
+              {f.balanceUnits === null && f.estimatedBalanceUnits ? `~${f.estimatedBalanceUnits}` : (f.balanceUnits ?? "—")}
+            </td>
             <td className="py-1.5 pr-4 text-right tabular-nums text-ink-secondary">{f.navPerUnit ?? "—"}</td>
             <td className="py-1.5 pr-4 text-right tabular-nums text-ink-secondary"><Amount value={f.investedAmount} /></td>
-            <td className="py-1.5 text-right tabular-nums text-ink"><Amount value={f.valuationAmount} /></td>
+            <td className="py-1.5 pr-4 text-right tabular-nums text-ink"><Amount value={effectiveCurrentValue(f)} /></td>
+            <td className="py-1.5 text-right tabular-nums">
+              <GainLossStat investedAmount={f.investedAmount} currentValue={effectiveCurrentValue(f)} />
+            </td>
           </tr>
         ))}
       </tbody>
@@ -540,12 +435,19 @@ function ClientFolioExplorerSection({
     [data],
   );
   const fileBase = `${exportBaseName}-${clientName?.replace(/\s+/g, "_") ?? "report"}`;
-  const exportHeaders = ["AMC", "Folio", "Scheme", "Units", "NAV", "Invested", "Current Value"];
+  const exportHeaders = ["AMC", "Folio", "Scheme", "Units", "NAV", "Invested", "Current Value", "P&L", "P&L %"];
   const exportBody = () =>
-    exportRows.map((f) => [
-      f.amcName, f.folioNumber, f.schemeName ?? `${f.amcCode}/${f.schemeCode}`,
-      f.balanceUnits ?? "", f.navPerUnit ?? "", f.investedAmount, f.valuationAmount ?? "",
-    ]);
+    exportRows.map((f) => {
+      const current = effectiveCurrentValue(f);
+      const invested = Number(f.investedAmount || 0);
+      const gain = current - invested;
+      const gainPercent = invested > 0.01 ? ((gain / invested) * 100).toFixed(2) : "";
+      return [
+        f.amcName, f.folioNumber, f.schemeName ?? `${f.amcCode}/${f.schemeCode}`,
+        f.balanceUnits === null && f.estimatedBalanceUnits ? `~${f.estimatedBalanceUnits}` : (f.balanceUnits ?? ""),
+        f.navPerUnit ?? "", f.investedAmount, current.toFixed(2), gain.toFixed(2), gainPercent,
+      ];
+    });
 
   return (
     <Card title={title}>
@@ -1096,6 +998,343 @@ function SipStpExpiringCamsTab({ arnIds }: TabProps) {
   );
 }
 
+interface CollapsedSipRow extends SipExplorerRow {
+  /** How many separate SipRegistration events (re-registrations, step-ups, etc.) exist for this exact folio+scheme — collapsed down to one representative row so the explorer shows current state, not a full historical audit trail. */
+  historicalCount: number;
+}
+
+/**
+ * Real folio+scheme data (e.g. a fund with a yearly step-up SIP) produces
+ * MULTIPLE SipRegistration rows over time — real confirmed case: one
+ * folio/scheme with 15 separate registration rows, one per year. Shown
+ * one-by-one, that reads as 15 different SIPs on the same fund, which is
+ * wrong — collapses to a single representative row per (folio, scheme):
+ * the active one if any registration is currently active, otherwise the
+ * most recently registered one, with a count of how many registration
+ * events exist historically for anyone who needs the detail.
+ */
+function collapseRegistrations(rows: SipExplorerRow[]): CollapsedSipRow[] {
+  const groups = new Map<string, SipExplorerRow[]>();
+  for (const r of rows) {
+    const key = `${r.folioNumber}|${r.schemeName ?? ""}`;
+    const arr = groups.get(key) ?? [];
+    arr.push(r);
+    groups.set(key, arr);
+  }
+  const result: CollapsedSipRow[] = [];
+  for (const group of groups.values()) {
+    const active = group.find((r) => r.isActive);
+    const representative = active ?? group.reduce((latest, r) => (r.registrationDate > latest.registrationDate ? r : latest));
+    result.push({ ...representative, historicalCount: group.length });
+  }
+  return result;
+}
+
+function StatusCell({ r }: { r: CollapsedSipRow }) {
+  if (r.isActive) {
+    return <span className="text-status-good">Active</span>;
+  }
+  return (
+    <span className="text-ink-muted" title={r.historicalCount > 1 ? `${r.historicalCount} registration events on this fund historically` : undefined}>
+      Ceased{r.ceaseDate ? ` on ${formatDate(r.ceaseDate)}` : ""}
+      {r.historicalCount > 1 ? ` (×${r.historicalCount})` : ""}
+    </span>
+  );
+}
+
+/**
+ * Real per-registration SIP/STP data (same SipRegistration rows the
+ * dashboard's Active SIP Value/Count and SIP Addition/Expiring reports
+ * already use), viewable two ways: AMC -> Scheme -> Client (which AMCs/
+ * schemes have the most SIP activity) and the reverse Client -> Scheme
+ * (which clients have how many SIPs and when they're due) — both built
+ * client-side from one flat list rather than the backend shipping two
+ * redundant nested structures for a dataset this small. Collapsed to one
+ * row per folio+scheme (see collapseRegistrations) so a fund with several
+ * historical registration events (step-ups, re-registrations after a
+ * cessation) shows as one current-state row, not several — the goal here
+ * is "what's active as of today", not a full event history.
+ */
+function SipExplorerTab({ arnIds }: TabProps) {
+  const { data, isLoading } = useSipExplorer(arnIds);
+  const [groupBy, setGroupBy] = useState<"amc" | "client">("amc");
+  const [expandedAmc, setExpandedAmc] = useState<Set<string>>(new Set());
+  const [expandedScheme, setExpandedScheme] = useState<Set<string>>(new Set());
+  const [expandedClient, setExpandedClient] = useState<Set<string>>(new Set());
+  const [pdfOpen, setPdfOpen] = useState(false);
+
+  const rows = useMemo(() => collapseRegistrations(data ?? []), [data]);
+  const activeRows = rows.filter((r) => r.isActive);
+  const activeClientCount = new Set(activeRows.map((r) => r.clientId)).size;
+  const activeTotalAmount = activeRows.reduce((sum, r) => sum + Number(r.sipAmount ?? 0), 0);
+
+  function toggle(set: Set<string>, setter: (s: Set<string>) => void, key: string) {
+    const next = new Set(set);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    setter(next);
+  }
+
+  const exportHeaders = ["Client", "AMC", "Scheme", "Folio", "Amount", "Frequency", "Start Date", "End Date", "Registration Date", "Status", "Next Due", "Past Registrations"];
+  const exportBody = () =>
+    rows.map((r) => [
+      r.clientName, r.amcName, r.schemeName ?? "", r.folioNumber, r.sipAmount ?? "", formatFrequencyLabel(r.frequency),
+      r.startDate ? formatDate(r.startDate) : "", r.endDate ? formatDate(r.endDate) : "", formatDate(r.registrationDate),
+      r.isActive ? "Active" : `Ceased${r.ceaseDate ? ` on ${formatDate(r.ceaseDate)}` : ""}`,
+      r.estimatedNextDueDate ? formatDate(r.estimatedNextDueDate) : "", r.historicalCount,
+    ]);
+
+  const byAmc = useMemo(() => {
+    const amcMap = new Map<string, { amcName: string; schemes: Map<string, { schemeName: string; rows: CollapsedSipRow[] }> }>();
+    for (const r of rows) {
+      const amcBucket = amcMap.get(r.amcCode) ?? { amcName: r.amcName, schemes: new Map() };
+      const schemeKey = r.schemeName ?? "—";
+      const schemeBucket = amcBucket.schemes.get(schemeKey) ?? { schemeName: schemeKey, rows: [] };
+      schemeBucket.rows.push(r);
+      amcBucket.schemes.set(schemeKey, schemeBucket);
+      amcMap.set(r.amcCode, amcBucket);
+    }
+    return Array.from(amcMap.entries())
+      .map(([amcCode, b]) => ({
+        amcCode,
+        amcName: b.amcName,
+        count: Array.from(b.schemes.values()).reduce((sum, s) => sum + s.rows.length, 0),
+        schemes: Array.from(b.schemes.values()).sort((a, b2) => b2.rows.length - a.rows.length),
+      }))
+      .sort((a, b) => b.count - a.count);
+  }, [rows]);
+
+  const byClient = useMemo(() => {
+    const clientMap = new Map<string, { clientName: string; rows: CollapsedSipRow[] }>();
+    for (const r of rows) {
+      const bucket = clientMap.get(r.clientId) ?? { clientName: r.clientName, rows: [] };
+      bucket.rows.push(r);
+      clientMap.set(r.clientId, bucket);
+    }
+    return Array.from(clientMap.entries())
+      .map(([clientId, b]) => ({ clientId, clientName: b.clientName, rows: b.rows }))
+      .sort((a, b) => b.rows.length - a.rows.length);
+  }, [rows]);
+
+  function RegistrationRow({ r, showScheme }: { r: CollapsedSipRow; showScheme: boolean }) {
+    return (
+      <tr>
+        {showScheme && <td className="py-1 pr-3 text-ink-secondary">{r.schemeName ?? "—"}</td>}
+        <td className="py-1 pr-3 text-ink-secondary">{r.folioNumber}</td>
+        <td className="py-1 pr-3 text-right tabular-nums text-ink"><Amount value={r.sipAmount} /></td>
+        <td className="py-1 pr-3 text-ink-secondary">{formatFrequencyLabel(r.frequency)}</td>
+        <td className="py-1 pr-3 text-right tabular-nums text-ink-muted">{r.startDate ? formatDate(r.startDate) : "—"}</td>
+        <td className="py-1 pr-3 text-right tabular-nums text-ink-muted">{r.endDate ? formatDate(r.endDate) : "—"}</td>
+        <td className="py-1 pr-3 text-right tabular-nums text-ink-muted">{r.estimatedNextDueDate ? formatDate(r.estimatedNextDueDate) : "—"}</td>
+        <td className="py-1 text-right"><StatusCell r={r} /></td>
+      </tr>
+    );
+  }
+
+  return (
+    <Card title="SIP Explorer">
+      <p className="mb-3 text-xs text-ink-muted">
+        Current SIP/STP status as of today, one row per fund — the same underlying data behind the dashboard's
+        Active SIP Value/Count and the SIP Addition/Expiring reports, browsable AMC-wise (which funds have the most
+        SIP activity) or client-wise (which clients have how many SIPs and when they're due). A fund with several
+        historical registration events (step-ups, re-registrations) is collapsed to its current state — active if
+        any registration is active, otherwise "Ceased on [date]" with a (×N) count of past events, not one row per
+        event. SIP and STP aren't currently distinguished in the data captured from WBR49/MFSD243, so this covers
+        both together.
+      </p>
+
+      <div className="mb-3 grid grid-cols-3 gap-3">
+        <div className="rounded-md border border-[var(--border)] p-2.5">
+          <p className="text-xs text-ink-secondary">Clients with Active SIP/STP</p>
+          <p className="mt-0.5 text-sm font-semibold text-ink">{isLoading ? "—" : formatCount(activeClientCount)}</p>
+        </div>
+        <div className="rounded-md border border-[var(--border)] p-2.5">
+          <p className="text-xs text-ink-secondary">Active Registrations</p>
+          <p className="mt-0.5 text-sm font-semibold text-ink">{isLoading ? "—" : formatCount(activeRows.length)}</p>
+        </div>
+        <div className="rounded-md border border-[var(--border)] p-2.5">
+          <p className="text-xs text-ink-secondary">Active Value (raw sum)</p>
+          <p className="mt-0.5 text-sm font-semibold text-ink"><Amount value={activeTotalAmount.toString()} /></p>
+        </div>
+      </div>
+
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex rounded-md border border-[var(--border)] text-sm">
+          <button
+            onClick={() => setGroupBy("amc")}
+            className={`rounded-l-md px-3 py-1.5 font-medium ${groupBy === "amc" ? "bg-series-1 text-white" : "text-ink-secondary hover:bg-[var(--gridline)]/50"}`}
+          >
+            By AMC → Scheme
+          </button>
+          <button
+            onClick={() => setGroupBy("client")}
+            className={`rounded-r-md px-3 py-1.5 font-medium ${groupBy === "client" ? "bg-series-1 text-white" : "text-ink-secondary hover:bg-[var(--gridline)]/50"}`}
+          >
+            By Client
+          </button>
+        </div>
+        {rows.length > 0 && (
+          <div className="flex items-center gap-2">
+            <button onClick={() => downloadCsv("sip-explorer.csv", exportHeaders, exportBody())} className="flex items-center gap-1.5 rounded-md border border-[var(--border)] px-2.5 py-1.5 text-xs font-medium text-ink-secondary hover:bg-[var(--gridline)]/50">
+              <Download size={13} /> CSV
+            </button>
+            <button onClick={() => downloadXlsx("sip-explorer.xlsx", "SIP Explorer", exportHeaders, exportBody())} className="flex items-center gap-1.5 rounded-md border border-[var(--border)] px-2.5 py-1.5 text-xs font-medium text-ink-secondary hover:bg-[var(--gridline)]/50">
+              <FileSpreadsheet size={13} /> Excel
+            </button>
+            <button onClick={() => setPdfOpen(true)} className="flex items-center gap-1.5 rounded-md border border-[var(--border)] px-2.5 py-1.5 text-xs font-medium text-ink-secondary hover:bg-[var(--gridline)]/50">
+              <Printer size={13} /> PDF
+            </button>
+          </div>
+        )}
+      </div>
+
+      {isLoading && <p className="py-6 text-center text-sm text-ink-muted">Loading…</p>}
+      {!isLoading && rows.length === 0 && <p className="py-6 text-center text-sm text-ink-muted">No SIP/STP registrations on record.</p>}
+
+      {!isLoading && groupBy === "amc" && (
+        <div className="space-y-2">
+          {byAmc.map((amc) => (
+            <div key={amc.amcCode} className="rounded-md border border-[var(--border)]">
+              <button
+                onClick={() => toggle(expandedAmc, setExpandedAmc, amc.amcCode)}
+                className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left hover:bg-[var(--gridline)]/30"
+              >
+                <span className="flex items-center gap-1.5 text-sm font-medium text-ink">
+                  {expandedAmc.has(amc.amcCode) ? <ChevronDownIcon /> : <ChevronRightIcon />}
+                  {amc.amcName}
+                </span>
+                <span className="text-xs text-ink-muted">{amc.count} registration{amc.count === 1 ? "" : "s"}</span>
+              </button>
+              {expandedAmc.has(amc.amcCode) && (
+                <div className="divide-y divide-[var(--gridline)] border-t border-[var(--border)] px-3">
+                  {amc.schemes.map((scheme) => {
+                    const key = `${amc.amcCode}|${scheme.schemeName}`;
+                    return (
+                      <div key={key}>
+                        <button
+                          onClick={() => toggle(expandedScheme, setExpandedScheme, key)}
+                          className="flex w-full items-center justify-between gap-3 py-2 text-left hover:bg-[var(--gridline)]/20"
+                        >
+                          <span className="flex items-center gap-1.5 text-xs font-medium text-ink-secondary">
+                            {expandedScheme.has(key) ? <ChevronDownIcon /> : <ChevronRightIcon />}
+                            {scheme.schemeName}
+                          </span>
+                          <span className="text-xs text-ink-muted">{scheme.rows.length}</span>
+                        </button>
+                        {expandedScheme.has(key) && (
+                          <div className="overflow-x-auto pb-2">
+                            <table className="w-full text-xs">
+                              <thead>
+                                <tr className="text-left text-ink-secondary">
+                                  <th className="py-1 pr-3 font-medium">Client</th>
+                                  <th className="py-1 pr-3 font-medium">Folio</th>
+                                  <th className="py-1 pr-3 text-right font-medium">Amount</th>
+                                  <th className="py-1 pr-3 font-medium">Frequency</th>
+                                  <th className="py-1 pr-3 text-right font-medium">Start</th>
+                                  <th className="py-1 pr-3 text-right font-medium">End</th>
+                                  <th className="py-1 pr-3 text-right font-medium">Next Due</th>
+                                  <th className="py-1 text-right font-medium">Status</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-[var(--gridline)]">
+                                {scheme.rows.map((r) => (
+                                  <tr key={r.id}>
+                                    <td className="py-1 pr-3 text-ink">{r.clientName}</td>
+                                    <td className="py-1 pr-3 text-ink-secondary">{r.folioNumber}</td>
+                                    <td className="py-1 pr-3 text-right tabular-nums text-ink"><Amount value={r.sipAmount} /></td>
+                                    <td className="py-1 pr-3 text-ink-secondary">{formatFrequencyLabel(r.frequency)}</td>
+                                    <td className="py-1 pr-3 text-right tabular-nums text-ink-muted">{r.startDate ? formatDate(r.startDate) : "—"}</td>
+                                    <td className="py-1 pr-3 text-right tabular-nums text-ink-muted">{r.endDate ? formatDate(r.endDate) : "—"}</td>
+                                    <td className="py-1 pr-3 text-right tabular-nums text-ink-muted">{r.estimatedNextDueDate ? formatDate(r.estimatedNextDueDate) : "—"}</td>
+                                    <td className="py-1 text-right"><StatusCell r={r} /></td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {!isLoading && groupBy === "client" && (
+        <div className="space-y-2">
+          {byClient.map((c) => (
+            <div key={c.clientId} className="rounded-md border border-[var(--border)]">
+              <button
+                onClick={() => toggle(expandedClient, setExpandedClient, c.clientId)}
+                className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left hover:bg-[var(--gridline)]/30"
+              >
+                <span className="flex items-center gap-1.5 text-sm font-medium text-ink">
+                  {expandedClient.has(c.clientId) ? <ChevronDownIcon /> : <ChevronRightIcon />}
+                  <Link to={`/crm/${c.clientId}`} onClick={(e) => e.stopPropagation()} className="text-series-1 hover:underline">{c.clientName}</Link>
+                </span>
+                <span className="text-xs text-ink-muted">{c.rows.length} registration{c.rows.length === 1 ? "" : "s"}</span>
+              </button>
+              {expandedClient.has(c.clientId) && (
+                <div className="overflow-x-auto border-t border-[var(--border)] px-3 pb-2">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="text-left text-ink-secondary">
+                        <th className="py-1 pr-3 font-medium">Scheme</th>
+                        <th className="py-1 pr-3 font-medium">Folio</th>
+                        <th className="py-1 pr-3 text-right font-medium">Amount</th>
+                        <th className="py-1 pr-3 font-medium">Frequency</th>
+                        <th className="py-1 pr-3 text-right font-medium">Start</th>
+                        <th className="py-1 pr-3 text-right font-medium">End</th>
+                        <th className="py-1 pr-3 text-right font-medium">Next Due</th>
+                        <th className="py-1 text-right font-medium">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[var(--gridline)]">
+                      {c.rows.map((r) => <RegistrationRow key={r.id} r={r} showScheme />)}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {pdfOpen && (
+        <PrintableModal title="SIP Explorer" subtitle={`${rows.length} funds (current status)`} onClose={() => setPdfOpen(false)}>
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-xs text-ink-secondary">
+                <th className="py-1.5 pr-4 font-medium">Client</th>
+                <th className="py-1.5 pr-4 font-medium">AMC / Scheme</th>
+                <th className="py-1.5 pr-4 font-medium">Folio</th>
+                <th className="py-1.5 pr-4 text-right font-medium">Amount</th>
+                <th className="py-1.5 pr-4 font-medium">Frequency</th>
+                <th className="py-1.5 text-right font-medium">Status</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[var(--gridline)]">
+              {rows.map((r) => (
+                <tr key={r.id}>
+                  <td className="py-1.5 pr-4 text-ink-secondary">{r.clientName}</td>
+                  <td className="py-1.5 pr-4 text-ink-secondary">{r.amcName} / {r.schemeName ?? "—"}</td>
+                  <td className="py-1.5 pr-4 text-ink-secondary">{r.folioNumber}</td>
+                  <td className="py-1.5 pr-4 text-right tabular-nums text-ink"><Amount value={r.sipAmount} /></td>
+                  <td className="py-1.5 pr-4 text-ink-secondary">{formatFrequencyLabel(r.frequency)}</td>
+                  <td className="py-1.5 text-right text-ink-secondary"><StatusCell r={r} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </PrintableModal>
+      )}
+    </Card>
+  );
+}
+
 function BrokerageWithheldTab({ arnIds }: TabProps) {
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
@@ -1170,45 +1409,74 @@ function BrokerageWithheldTab({ arnIds }: TabProps) {
 
 function SwitchTab({ kind, arnIds }: { kind: "stp" | "swp" } & TabProps) {
   const [page, setPage] = useState(1);
-  const stp = useStpReport(page, arnIds);
-  const swp = useSwpReport(page, arnIds);
+  const [status, setStatus] = useState<"new" | "active" | "ceased" | undefined>(undefined);
+  const stp = useStpReport(page, status, arnIds);
+  const swp = useSwpReport(page, status, arnIds);
   const { data, isLoading } = kind === "stp" ? stp : swp;
+  const title = kind === "stp" ? "STP Report" : "SWP Report";
   return (
-    <Card title={kind === "stp" ? "STP Report" : "SWP Report"}>
+    <Card title={title}>
       <p className="mb-2 text-xs text-ink-muted">
-        {kind === "stp"
-          ? "Every switch-in/switch-out transaction — a real recurring STP mandate isn't a separate ingested record, so a one-off manual switch looks identical here."
-          : "Every redemption transaction — a real recurring SWP mandate isn't a separate ingested record, so a one-off manual redemption looks identical here."}
+        Real {kind === "stp" ? "STP" : "SWP"} mandates registered with the RTA (WBR49/MFSD243), not transactions —
+        a folio only appears here if it actually has a standing {kind === "stp" ? "transfer" : "withdrawal"} instruction on file.
       </p>
-      <div className="mb-2 flex justify-end">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <label className="flex items-center gap-2 text-xs text-ink-secondary">
+          Status
+          <select
+            value={status ?? "all"}
+            onChange={(e) => {
+              setStatus(e.target.value === "all" ? undefined : (e.target.value as "new" | "active" | "ceased"));
+              setPage(1);
+            }}
+            className="rounded-md border border-[var(--border)] bg-surface px-2 py-1 text-xs text-ink"
+          >
+            <option value="all">All</option>
+            <option value="active">Active</option>
+            <option value="new">New this month</option>
+            <option value="ceased">Ceased</option>
+          </select>
+        </label>
         <ExportToolbar
           filenameBase={kind === "stp" ? "stp-report" : "swp-report"}
           sheetName={kind === "stp" ? "STP" : "SWP"}
-          title={kind === "stp" ? "STP Report" : "SWP Report"}
-          headers={["Client", "Scheme", "Type", "Amount", "Date"]}
-          rows={data?.transactions.map((t) => [t.clientName, t.schemeName ?? "", t.transactionType, t.amount ?? "", formatDate(t.transactionDate)]) ?? []}
+          title={title}
+          headers={["Client", "Folio", "Scheme", "Amount", "Frequency", "Registered", "Status"]}
+          rows={
+            data?.sips.map((s) => [
+              s.clientName,
+              s.folioNumber,
+              s.schemeName ?? "",
+              s.sipAmount ?? "",
+              s.frequency ?? "",
+              formatDate(s.registrationDate),
+              s.isActive ? "Active" : "Ceased",
+            ]) ?? []
+          }
         />
       </div>
       <table className="w-full text-sm">
         <thead>
           <tr className="text-left text-xs text-ink-secondary">
             <th className="py-1.5 pr-4 font-medium">Client</th>
+            <th className="py-1.5 pr-4 font-medium">Folio</th>
             <th className="py-1.5 pr-4 font-medium">Scheme</th>
-            <th className="py-1.5 pr-4 font-medium">Type</th>
             <th className="py-1.5 pr-4 text-right font-medium">Amount</th>
-            <th className="py-1.5 text-right font-medium">Date</th>
+            <th className="py-1.5 pr-4 font-medium">Frequency</th>
+            <th className="py-1.5 text-right font-medium">Status</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-[var(--gridline)]">
-          {isLoading && <tr><td colSpan={5} className="py-4 text-center text-ink-muted">Loading…</td></tr>}
-          {data?.transactions.length === 0 && <tr><td colSpan={5} className="py-4 text-center text-ink-muted">None.</td></tr>}
-          {data?.transactions.map((t) => (
-            <tr key={t.id}>
-              <td className="py-1.5 pr-4 text-ink">{t.clientName}</td>
-              <td className="py-1.5 pr-4 text-ink-secondary">{t.schemeName ?? "—"}</td>
-              <td className="py-1.5 pr-4 text-ink-secondary">{t.transactionType}</td>
-              <td className="py-1.5 pr-4 text-right tabular-nums text-ink"><Amount value={t.amount} /></td>
-              <td className="py-1.5 text-right tabular-nums text-ink-muted">{formatDate(t.transactionDate)}</td>
+          {isLoading && <tr><td colSpan={6} className="py-4 text-center text-ink-muted">Loading…</td></tr>}
+          {data?.sips.length === 0 && <tr><td colSpan={6} className="py-4 text-center text-ink-muted">None.</td></tr>}
+          {data?.sips.map((s) => (
+            <tr key={s.id}>
+              <td className="py-1.5 pr-4 text-ink">{s.clientName}</td>
+              <td className="py-1.5 pr-4 text-ink-secondary">{s.folioNumber}</td>
+              <td className="py-1.5 pr-4 text-ink-secondary">{s.schemeName ?? "—"}</td>
+              <td className="py-1.5 pr-4 text-right tabular-nums text-ink"><Amount value={s.sipAmount} /></td>
+              <td className="py-1.5 pr-4 text-ink-secondary">{s.frequency ?? "—"}</td>
+              <td className="py-1.5 text-right tabular-nums text-ink-muted">{s.isActive ? "Active" : "Ceased"}</td>
             </tr>
           ))}
         </tbody>
@@ -1562,6 +1830,7 @@ export function ReportsPage() {
           {distributorTab === "sip-due" && <SipDueTab arnIds={arnIds} />}
           {distributorTab === "sip-expiring" && <SipExpiringTab arnIds={arnIds} />}
           {distributorTab === "sip-stp-expiring-cams" && <SipStpExpiringCamsTab arnIds={arnIds} />}
+          {distributorTab === "sip-explorer" && <SipExplorerTab arnIds={arnIds} />}
           {distributorTab === "stp" && <SwitchTab kind="stp" arnIds={arnIds} />}
           {distributorTab === "swp" && <SwitchTab kind="swp" arnIds={arnIds} />}
           {distributorTab === "brokerage-withheld" && <BrokerageWithheldTab arnIds={arnIds} />}

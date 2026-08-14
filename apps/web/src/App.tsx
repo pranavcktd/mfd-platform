@@ -22,10 +22,12 @@ import { SuperAdminLoginPage } from "./pages/SuperAdminLoginPage";
 import { SuperAdminMfdListPage } from "./pages/SuperAdminMfdListPage";
 import { SuperAdminOnboardPage } from "./pages/SuperAdminOnboardPage";
 import { SuperAdminMailSyncPage } from "./pages/SuperAdminMailSyncPage";
+import { SuperAdminImportedDataPage } from "./pages/SuperAdminImportedDataPage";
 import { SuperAdminNavSyncPage } from "./pages/SuperAdminNavSyncPage";
 import { SuperAdminDataQualityPage } from "./pages/SuperAdminDataQualityPage";
 import { SuperAdminFolderImportPage } from "./pages/SuperAdminFolderImportPage";
 import { SuperAdminEquityMasterPage } from "./pages/SuperAdminEquityMasterPage";
+import { SuperAdminRtaConfigPage } from "./pages/SuperAdminRtaConfigPage";
 import { SuperAdminStatusPage } from "./pages/SuperAdminStatusPage";
 import { SuperAdminAuditLogPage } from "./pages/SuperAdminAuditLogPage";
 import { SuperAdminSettingsPage } from "./pages/SuperAdminSettingsPage";
@@ -35,6 +37,7 @@ import { ClientPortalLoginPage } from "./pages/ClientPortalLoginPage";
 import { ClientPortalDashboardPage } from "./pages/ClientPortalDashboardPage";
 import { ClientPortalHoldingsPage } from "./pages/ClientPortalHoldingsPage";
 import { ClientPortalTransactionsPage } from "./pages/ClientPortalTransactionsPage";
+import { ClientPortalCapitalGainsPage } from "./pages/ClientPortalCapitalGainsPage";
 import { ClientPortalProfilePage } from "./pages/ClientPortalProfilePage";
 import { ClientPortalFamilyMemberPage } from "./pages/ClientPortalFamilyMemberPage";
 import { NAV_ITEMS } from "./lib/nav-config";
@@ -61,6 +64,8 @@ export function App() {
                 <Route path="/" element={<SuperAdminMfdListPage />} />
                 <Route path="/onboard" element={<SuperAdminOnboardPage />} />
                 <Route path="/mail-sync" element={<SuperAdminMailSyncPage />} />
+                <Route path="/rta-config" element={<SuperAdminRtaConfigPage />} />
+                <Route path="/imported-data" element={<SuperAdminImportedDataPage />} />
                 <Route path="/nav-sync" element={<SuperAdminNavSyncPage />} />
                 <Route path="/data-quality" element={<SuperAdminDataQualityPage />} />
                 <Route path="/folder-import" element={<SuperAdminFolderImportPage />} />
@@ -83,6 +88,7 @@ export function App() {
                 <Route path="/" element={<ClientPortalDashboardPage />} />
                 <Route path="/holdings" element={<ClientPortalHoldingsPage />} />
                 <Route path="/transactions" element={<ClientPortalTransactionsPage />} />
+                <Route path="/capital-gains" element={<ClientPortalCapitalGainsPage />} />
                 <Route path="/profile" element={<ClientPortalProfilePage />} />
                 <Route path="/family/:memberId" element={<ClientPortalFamilyMemberPage />} />
               </Routes>

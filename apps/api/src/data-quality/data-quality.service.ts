@@ -156,7 +156,7 @@ export class DataQualityService {
   async applyCorrection(folioId: string, fields: CorrectionFields): Promise<ApplyCorrectionResult> {
     const folio = await prisma.folio.findUnique({
       where: { id: folioId },
-      select: { id: true, distributorId: true, amcCode: true, schemeName: true, rtaType: true },
+      select: { id: true, distributorId: true, amcCode: true, schemeName: true, rtaType: true, isin: true },
     });
     if (!folio) throw new NotFoundException("Folio not found");
 
@@ -168,11 +168,17 @@ export class DataQualityService {
     // Nippon-India finding), so since every folio necessarily came from one
     // of exactly two RTAs, it must be KFintech. Any other amc_code is a
     // real WBR39/CAMS row, so the scheme is CAMS-serviced. Never overrides
-    // an already-known rtaType — only fills a genuine unknown.
+    // an already-known rtaType — only fills a genuine unknown. Uses the
+    // folio's EXISTING isin too, not just one being actively corrected
+    // right now — a real gap this closed: a folio can already have a
+    // correct isin (fixed in an earlier round) yet still show up in the
+    // "No RTA identified" bucket forever, because the old version of this
+    // check only ran when isin itself was part of THIS specific correction.
     const effectiveFields = { ...fields };
-    if (effectiveFields.isin !== undefined && effectiveFields.rtaType === undefined && !folio.rtaType) {
+    const effectiveIsin = effectiveFields.isin ?? folio.isin ?? undefined;
+    if (effectiveIsin && effectiveFields.rtaType === undefined && !folio.rtaType) {
       const schemeRow = await prisma.schemeMaster.findFirst({
-        where: { isin: effectiveFields.isin },
+        where: { isin: effectiveIsin },
         select: { amcCode: true },
       });
       if (schemeRow) {

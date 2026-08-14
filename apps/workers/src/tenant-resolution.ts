@@ -36,15 +36,38 @@ async function resolveByArnCode(rawArnCode: string): Promise<ResolvedTenant | nu
  * (matching the original recipient against ArnProfile.camsMailId) once the
  * mail-ingestion pipeline is built — two independent signals agreeing is
  * safer than trusting either alone for something this security-sensitive.
+ *
+ * `fallbackDistributorId` is ONLY consulted when the batch has ZERO ARN
+ * codes anywhere — confirmed real case (CAMS's WBR9C, 2026-08-09): a
+ * genuinely rich combined investor/KYC/nominee/bank/balance report with no
+ * broker-code column at all, unlike every other report type ingested so
+ * far. Still fails closed the moment there's any real ARN-code signal to
+ * reason about (a lone unmatched code, or multiple distinct codes) —
+ * the fallback only fires when there's truly nothing in the data itself to
+ * cross-check, and only ever to the ONE distributor the folder-import (or
+ * mail-header match) caller already explicitly identified, never a guess
+ * across tenants. arnProfileId in that case is the distributor's parent
+ * ARN (best-effort — this data isn't ARN-specific to begin with).
  */
 export async function resolveTenantFromRecords<T extends { brokerArnCode?: string }>(
   records: T[],
+  fallbackDistributorId?: string,
 ): Promise<ResolvedTenant> {
   const distinctCodes = new Set(
     records.map((r) => r.brokerArnCode).filter((code): code is string => Boolean(code)),
   );
 
   if (distinctCodes.size === 0) {
+    if (fallbackDistributorId) {
+      const parentArn = await prisma.arnProfile.findFirst({
+        where: { distributorId: fallbackDistributorId, parentArnProfileId: null },
+        select: { id: true },
+      });
+      const anyArn = parentArn ?? (await prisma.arnProfile.findFirst({ where: { distributorId: fallbackDistributorId }, select: { id: true } }));
+      if (anyArn) {
+        return { distributorId: fallbackDistributorId, arnProfileId: anyArn.id };
+      }
+    }
     throw new Error("No record in this batch carries a broker ARN code — cannot determine the owning distributor");
   }
   if (distinctCodes.size > 1) {

@@ -6,3 +6,4 @@ export * from "./queue-names";
 export * from "./amc-names";
 export * from "./kfintech-amc-codes";
 export * from "./scheme-name-key";
+export * from "./folder-import-classify";

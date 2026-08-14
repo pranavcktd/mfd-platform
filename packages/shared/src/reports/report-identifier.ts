@@ -4,9 +4,13 @@ import { looksLikeInvestorMaster } from "./investor-master";
 import { looksLikeClientAum } from "./client-aum";
 import { looksLikeSipRegistration } from "./sip-registration";
 import { looksLikeKycStatus } from "./kyc-status";
+import { looksLikePanKycStatus } from "./pan-kyc-status";
 import { looksLikeBrokerageWithheld } from "./brokerage-withheld";
+import { looksLikeBrokerageEarned } from "./brokerage-earned";
 import { looksLikeSipExpiry } from "./sip-expiry";
 import { looksLikeSchemeMaster } from "./scheme-master";
+import { looksLikeBankAccountDetails } from "./bank-account-details";
+import { looksLikeNomineeDetails } from "./nominee-details";
 
 export type KnownReportCode =
   | "MFSD201"
@@ -14,9 +18,13 @@ export type KnownReportCode =
   | "CLIENT_AUM"
   | "SIP_REGISTRATION"
   | "KYC_STATUS"
+  | "PAN_KYC_STATUS"
   | "BROKERAGE_WITHHELD"
+  | "BROKERAGE_EARNED"
   | "SIP_EXPIRY"
-  | "SCHEME_MASTER";
+  | "SCHEME_MASTER"
+  | "BANK_ACCOUNT_DETAILS"
+  | "NOMINEE_DETAILS";
 
 /**
  * Identifies which known report definition a raw record matches, trying
@@ -39,8 +47,20 @@ export function identifyReport(
   if (looksLikeBrokerageWithheld(rawRecord, rtaType)) {
     return "BROKERAGE_WITHHELD";
   }
+  if (looksLikeBrokerageEarned(rawRecord, rtaType)) {
+    return "BROKERAGE_EARNED";
+  }
   if (looksLikeKycStatus(rawRecord, rtaType)) {
     return "KYC_STATUS";
+  }
+  if (looksLikePanKycStatus(rawRecord, rtaType)) {
+    return "PAN_KYC_STATUS";
+  }
+  if (looksLikeBankAccountDetails(rawRecord, rtaType)) {
+    return "BANK_ACCOUNT_DETAILS";
+  }
+  if (looksLikeNomineeDetails(rawRecord, rtaType)) {
+    return "NOMINEE_DETAILS";
   }
   if (looksLikeSipExpiry(rawRecord, rtaType)) {
     return "SIP_EXPIRY";

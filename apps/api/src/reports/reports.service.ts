@@ -1,6 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import { Prisma, prisma } from "@mfd/db";
-import { resolveAmcName } from "@mfd/shared";
+import { resolveAmcName, computeXirr } from "@mfd/shared";
 import { TenantContext } from "../tenant/tenant-context";
 import {
   computeFifoRealizedGains,
@@ -11,6 +11,7 @@ import {
   type GainClassification,
 } from "./capital-gains";
 import { fetchLatestNavByIsin, computeLiveValue } from "./live-valuation";
+import { estimateNextDueDate, monthlyEquivalentAmount, normalizeFrequencyKey } from "./sip-frequency";
 
 const PAGE_SIZE = 25;
 
@@ -121,14 +122,43 @@ export class ReportsService {
     };
   }
 
-  /** Distributor report: SIP registrations, filterable by lifecycle status. */
-  async getSipReport(status: "new" | "active" | "ceased" | undefined, page: number, requestedArnProfileIds?: string[]) {
+  /**
+   * Distributor reports: SIP/STP/SWP registrations, filterable by lifecycle
+   * status — one shared query behind three thin type-scoped wrappers.
+   *
+   * Real bug fixed 2026-08-12: before `SipRegistration.registrationType`
+   * existed, this method (and getSipDueReport/getSipBreakdown/
+   * getSipExplorer/getSipExpiringReport below) had no way to tell a SIP
+   * registration apart from an STP or SWP one, so every one of them
+   * silently blended all three under the "SIP" label — e.g. the live
+   * "Active SIP Value" dashboard stat was counting 899 active
+   * SIP+STP+SWP registrations combined as if all 899 were SIPs, when only
+   * 831 actually are. Now that registrationType is populated (backfilled
+   * from real WBR49/MFSD243 data — see mapSipRegistrationRecord), every one
+   * of these methods filters to its own type explicitly.
+   *
+   * Also replaces the OLD `getStpReport`/`getSwpReport`, which used to
+   * derive STP/SWP from raw Transaction history (every SWITCH_IN/OUT =
+   * "STP", every REDEMPTION = "SWP") because no dedicated registration feed
+   * was ingested yet — self-documented at the time as an approximation
+   * ("a one-off manual switch/redemption is indistinguishable from a
+   * systematic one in this data"). That's no longer true: WBR49/MFSD243
+   * carry the RTA's own STP/SWP mandate records directly, so this is
+   * strictly more accurate than the transaction-heuristic version was.
+   */
+  private async getRegistrationReport(
+    registrationType: "SIP" | "STP" | "SWP",
+    status: "new" | "active" | "ceased" | undefined,
+    page: number,
+    requestedArnProfileIds?: string[],
+  ) {
     const distributorId = TenantContext.currentDistributorId();
     const arnScope = await this.resolveArnScope(requestedArnProfileIds);
     const startOfMonth = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1));
 
     const where = {
       distributorId,
+      registrationType,
       ...(status === "new" ? { registrationDate: { gte: startOfMonth } } : {}),
       ...(status === "active" ? { isActive: true } : {}),
       ...(status === "ceased" ? { isActive: false } : {}),
@@ -142,7 +172,7 @@ export class ReportsService {
         orderBy: { registrationDate: "desc" },
         skip: (page - 1) * PAGE_SIZE,
         take: PAGE_SIZE,
-        include: { folio: { select: { folioNumber: true, amcCode: true, client: { select: { name: true } } } } },
+        include: { folio: { select: { folioNumber: true, amcCode: true, schemeName: true, client: { select: { name: true } } } } },
       }),
     ]);
 
@@ -156,6 +186,7 @@ export class ReportsService {
         folioNumber: s.folio.folioNumber,
         amcCode: s.folio.amcCode,
         schemeCode: s.schemeCode,
+        schemeName: s.folio.schemeName,
         sipAmount: s.sipAmount?.toString() ?? null,
         frequency: s.frequency,
         registrationDate: s.registrationDate,
@@ -165,6 +196,18 @@ export class ReportsService {
         isActive: s.isActive,
       })),
     };
+  }
+
+  async getSipReport(status: "new" | "active" | "ceased" | undefined, page: number, requestedArnProfileIds?: string[]) {
+    return this.getRegistrationReport("SIP", status, page, requestedArnProfileIds);
+  }
+
+  async getStpReport(status: "new" | "active" | "ceased" | undefined, page: number, requestedArnProfileIds?: string[]) {
+    return this.getRegistrationReport("STP", status, page, requestedArnProfileIds);
+  }
+
+  async getSwpReport(status: "new" | "active" | "ceased" | undefined, page: number, requestedArnProfileIds?: string[]) {
+    return this.getRegistrationReport("SWP", status, page, requestedArnProfileIds);
   }
 
   /** Client report: per-folio holdings, optionally scoped to one client. */
@@ -568,8 +611,15 @@ export class ReportsService {
     clientId?: string,
     fyStartDate?: Date,
     fyEndDate?: Date,
+    // Client-portal callers run under ClientTenantContext, not TenantContext
+    // (a distinct, separate AsyncLocalStorage scope — see
+    // ClientAuthMiddleware's doc comment), so TenantContext.currentDistributorId()
+    // would throw for them. ClientPortalService passes its own
+    // ClientTenantContext-sourced distributorId here instead of duplicating
+    // this whole FIFO/tax computation a second time.
+    overrideDistributorId?: string,
   ) {
-    const distributorId = TenantContext.currentDistributorId();
+    const distributorId = overrideDistributorId ?? TenantContext.currentDistributorId();
     const arnScope = await this.resolveArnScope(requestedArnProfileIds);
     const folios = await prisma.folio.findMany({
       where: { distributorId, ...(clientId ? { clientId } : {}), ...(arnScope ? { arnProfileId: { in: arnScope } } : {}) },
@@ -584,7 +634,7 @@ export class ReportsService {
         valuationAmount: true,
         client: { select: { id: true, name: true } },
         transactions: {
-          orderBy: { transactionDate: "asc" },
+          orderBy: [{ transactionDate: "asc" }, { id: "asc" }],
           select: { transactionType: true, transactionDate: true, amount: true, units: true, isRejection: true },
         },
       },
@@ -608,6 +658,10 @@ export class ReportsService {
       grandfatheringApplied: boolean;
       valuationSource: "RTA" | "LIVE_NAV";
       asOfOrDate: Date | null;
+      /** True if any lot in this folio had no matching purchase in the ingested transaction history — its cost basis and STCG/LTCG classification are a placeholder (100% gain, STCG), not necessarily correct. Typically means since-inception import hasn't captured this folio's full history yet. */
+      hasIncompleteHistory: boolean;
+      /** Portion of the gain above that's coming from those flagged lots specifically — the amount that's likely to change once full history is imported. */
+      incompleteHistoryGain: string;
     }> = [];
 
     for (const folio of folios) {
@@ -625,6 +679,8 @@ export class ReportsService {
         let grandfatheringNote = false;
         let grandfatheringApplied = false;
         let lastSaleDate: Date | null = null;
+        let hasIncompleteHistory = false;
+        let incompleteHistoryGain = 0;
 
         for (const lot of lots) {
           if (lot.classification === "STCG") stcgGain += lot.gain;
@@ -638,6 +694,10 @@ export class ReportsService {
           if (lot.grandfatheringApplicable) grandfatheringNote = true;
           if (lot.grandfatheringApplied) grandfatheringApplied = true;
           if (!lastSaleDate || lot.saleDate > lastSaleDate) lastSaleDate = lot.saleDate;
+          if (lot.costBasisUnknown) {
+            hasIncompleteHistory = true;
+            incompleteHistoryGain += lot.gain;
+          }
         }
 
         rows.push({
@@ -655,6 +715,8 @@ export class ReportsService {
           grandfatheringApplied,
           valuationSource: "RTA",
           asOfOrDate: lastSaleDate,
+          hasIncompleteHistory,
+          incompleteHistoryGain: incompleteHistoryGain.toFixed(2),
         });
       } else {
         const currentUnits = Number(folio.balanceUnits ?? 0);
@@ -673,6 +735,8 @@ export class ReportsService {
         let taxNotComputableGain = 0;
         let grandfatheringNote = false;
         let grandfatheringApplied = false;
+        let hasIncompleteHistory = false;
+        let incompleteHistoryGain = 0;
 
         for (const lot of lots) {
           if (lot.classification === "STCG") stcgGain += lot.gain;
@@ -685,6 +749,10 @@ export class ReportsService {
           }
           if (lot.grandfatheringApplicable) grandfatheringNote = true;
           if (lot.grandfatheringApplied) grandfatheringApplied = true;
+          if (lot.costBasisUnknown) {
+            hasIncompleteHistory = true;
+            incompleteHistoryGain += lot.gain;
+          }
         }
 
         rows.push({
@@ -702,6 +770,8 @@ export class ReportsService {
           grandfatheringApplied,
           valuationSource: liveValuation.liveValue !== null ? "LIVE_NAV" : "RTA",
           asOfOrDate: null,
+          hasIncompleteHistory,
+          incompleteHistoryGain: incompleteHistoryGain.toFixed(2),
         });
       }
     }
@@ -749,8 +819,10 @@ export class ReportsService {
     clientId?: string,
     fyStartDate?: Date,
     fyEndDate?: Date,
+    /** See getCapitalGainsReport's own doc comment on why this exists — same client-portal reuse. */
+    overrideDistributorId?: string,
   ) {
-    const distributorId = TenantContext.currentDistributorId();
+    const distributorId = overrideDistributorId ?? TenantContext.currentDistributorId();
     const arnScope = await this.resolveArnScope(requestedArnProfileIds);
     const folios = await prisma.folio.findMany({
       where: { distributorId, ...(clientId ? { clientId } : {}), ...(arnScope ? { arnProfileId: { in: arnScope } } : {}) },
@@ -764,7 +836,7 @@ export class ReportsService {
         valuationAmount: true,
         client: { select: { id: true, name: true } },
         transactions: {
-          orderBy: { transactionDate: "asc" },
+          orderBy: [{ transactionDate: "asc" }, { id: "asc" }],
           select: { transactionType: true, transactionDate: true, amount: true, units: true, isRejection: true },
         },
       },
@@ -791,6 +863,8 @@ export class ReportsService {
       estimatedTax: string | null;
       grandfatheringApplicable: boolean;
       grandfatheringApplied: boolean;
+      /** See RealizedGainLot/UnrealizedGainLot's own doc comment — true means no matching purchase was found in the ingested history, so costBasis/classification here is a placeholder, not necessarily correct. */
+      costBasisUnknown: boolean;
     }> = [];
 
     for (const folio of folios) {
@@ -817,6 +891,7 @@ export class ReportsService {
             estimatedTax: lot.estimatedTax !== null ? lot.estimatedTax.toFixed(2) : null,
             grandfatheringApplicable: lot.grandfatheringApplicable,
             grandfatheringApplied: lot.grandfatheringApplied,
+            costBasisUnknown: lot.costBasisUnknown,
           });
         }
       } else {
@@ -846,6 +921,7 @@ export class ReportsService {
             estimatedTax: lot.estimatedTax !== null ? lot.estimatedTax.toFixed(2) : null,
             grandfatheringApplicable: lot.grandfatheringApplicable,
             grandfatheringApplied: lot.grandfatheringApplied,
+            costBasisUnknown: lot.costBasisUnknown,
           });
         }
       }
@@ -941,7 +1017,10 @@ export class ReportsService {
    * Distributor report: SIPs due soon — estimated from startDate +
    * frequency, since no per-installment "next due date" field is ingested
    * (WBR49/MFSD243 carry registration/status, not a payment schedule).
-   * Labeled as an estimate in the frontend, not authoritative.
+   * Labeled as an estimate in the frontend, not authoritative. Scoped to
+   * registrationType: "SIP" — see getRegistrationReport's doc comment for
+   * why this filter is required (an active STP/SWP would otherwise show up
+   * here mislabeled as a SIP installment due soon).
    */
   async getSipDueReport(withinDays = 7, requestedArnProfileIds?: string[]) {
     const distributorId = TenantContext.currentDistributorId();
@@ -949,6 +1028,7 @@ export class ReportsService {
     const activeSips = await prisma.sipRegistration.findMany({
       where: {
         distributorId,
+        registrationType: "SIP",
         isActive: true,
         startDate: { not: null },
         ...(arnScope ? { folio: { arnProfileId: { in: arnScope } } } : {}),
@@ -958,17 +1038,14 @@ export class ReportsService {
 
     const today = new Date();
     const cutoff = new Date(today.getTime() + withinDays * 24 * 60 * 60 * 1000);
-    const frequencyToDays: Record<string, number> = { MONTHLY: 30, QUARTERLY: 91, WEEKLY: 7, DAILY: 1, ANNUALLY: 365 };
 
     const rows: Array<{ id: string; clientName: string; folioNumber: string; sipAmount: string | null; estimatedNextDueDate: string }> = [];
     for (const sip of activeSips) {
       if (!sip.startDate) continue;
-      const intervalDays = frequencyToDays[sip.frequency?.toUpperCase() ?? "MONTHLY"] ?? 30;
-      let next = new Date(sip.startDate);
-      while (next < today) {
-        next = new Date(next.getTime() + intervalDays * 24 * 60 * 60 * 1000);
-      }
-      if (next <= cutoff) {
+      // A One Shot registration (see sip-frequency.ts) has no "next"
+      // installment at all — correctly excluded from a due-soon report.
+      const next = estimateNextDueDate(sip.startDate, sip.frequency, today);
+      if (next && next <= cutoff) {
         rows.push({
           id: sip.id,
           clientName: sip.folio.client.name,
@@ -981,7 +1058,168 @@ export class ReportsService {
     return rows.sort((a, b) => a.estimatedNextDueDate.localeCompare(b.estimatedNextDueDate));
   }
 
-  /** Distributor report: active SIPs whose endDate falls within the window — real data, direct from SipRegistration.endDate. */
+  /**
+   * Frequency-wise breakdown of active SIP registrations — the dashboard's
+   * "Active SIP Value" was a single blended sum of every active
+   * SipRegistration.sipAmount regardless of frequency, which silently added
+   * a quarterly SIP's full installment into what's labeled a monthly
+   * figure. This breaks it out per real frequency (count + raw sum) and
+   * also computes a genuinely comparable "monthly equivalent" per bucket
+   * and overall (quarterly ÷3, weekly ×4.33, etc — see sip-frequency.ts),
+   * so "Active SIP Value" can mean "what I'd expect this month" rather
+   * than an apples-to-oranges sum. Scoped to registrationType: "SIP" (see
+   * getRegistrationReport's doc comment) — was blended across SIP+STP+SWP
+   * before that field existed; now that it does, this is genuinely SIP-only,
+   * and getRegistrationTypeBreakdown below covers the SIP-vs-STP-vs-SWP split.
+   */
+  async getSipBreakdown(requestedArnProfileIds?: string[]) {
+    const distributorId = TenantContext.currentDistributorId();
+    const arnScope = await this.resolveArnScope(requestedArnProfileIds);
+    const activeSips = await prisma.sipRegistration.findMany({
+      where: {
+        distributorId,
+        registrationType: "SIP",
+        isActive: true,
+        ...(arnScope ? { folio: { arnProfileId: { in: arnScope } } } : {}),
+      },
+      select: { sipAmount: true, frequency: true },
+    });
+
+    const buckets = new Map<string, { frequency: string; count: number; totalAmount: number; monthlyEquivalent: number }>();
+    let totalCount = 0;
+    let totalRawAmount = 0;
+    let totalMonthlyEquivalent = 0;
+    for (const sip of activeSips) {
+      const amount = Number(sip.sipAmount ?? 0);
+      const key = normalizeFrequencyKey(sip.frequency);
+      const monthly = monthlyEquivalentAmount(amount, sip.frequency);
+      const bucket = buckets.get(key) ?? { frequency: key, count: 0, totalAmount: 0, monthlyEquivalent: 0 };
+      bucket.count++;
+      bucket.totalAmount += amount;
+      bucket.monthlyEquivalent += monthly;
+      buckets.set(key, bucket);
+
+      totalCount++;
+      totalRawAmount += amount;
+      totalMonthlyEquivalent += monthly;
+    }
+
+    return {
+      totalCount,
+      totalRawAmount: totalRawAmount.toString(),
+      totalMonthlyEquivalent: totalMonthlyEquivalent.toFixed(2),
+      byFrequency: Array.from(buckets.values())
+        .map((b) => ({
+          frequency: b.frequency,
+          count: b.count,
+          totalAmount: b.totalAmount.toString(),
+          monthlyEquivalent: b.monthlyEquivalent.toFixed(2),
+        }))
+        .sort((a, b) => b.count - a.count),
+    };
+  }
+
+  /**
+   * SIP-vs-STP-vs-SWP split of active registrations — for the Dashboard/
+   * Analysis breakdown card. Count + raw sipAmount sum + monthly-equivalent
+   * sum per type (see monthlyEquivalentAmount — puts a quarterly STP and a
+   * monthly SIP on the same comparable footing), covering all three
+   * registrationType values in one query rather than three separate calls.
+   */
+  async getRegistrationTypeBreakdown(requestedArnProfileIds?: string[]) {
+    const distributorId = TenantContext.currentDistributorId();
+    const arnScope = await this.resolveArnScope(requestedArnProfileIds);
+    const activeRegistrations = await prisma.sipRegistration.findMany({
+      where: {
+        distributorId,
+        isActive: true,
+        registrationType: { not: null },
+        ...(arnScope ? { folio: { arnProfileId: { in: arnScope } } } : {}),
+      },
+      select: { registrationType: true, sipAmount: true, frequency: true },
+    });
+
+    const buckets = new Map<string, { count: number; totalAmount: number; monthlyEquivalent: number }>();
+    for (const type of ["SIP", "STP", "SWP"]) {
+      buckets.set(type, { count: 0, totalAmount: 0, monthlyEquivalent: 0 });
+    }
+    for (const r of activeRegistrations) {
+      const type = r.registrationType as string;
+      const bucket = buckets.get(type);
+      if (!bucket) continue; // defensive — registrationType is a closed set, but never trust it blindly
+      const amount = Number(r.sipAmount ?? 0);
+      bucket.count++;
+      bucket.totalAmount += amount;
+      bucket.monthlyEquivalent += monthlyEquivalentAmount(amount, r.frequency);
+    }
+
+    return Array.from(buckets.entries()).map(([registrationType, b]) => ({
+      registrationType,
+      count: b.count,
+      totalAmount: b.totalAmount.toString(),
+      monthlyEquivalent: b.monthlyEquivalent.toFixed(2),
+    }));
+  }
+
+  /**
+   * Flat, real per-registration SIP/STP data (real registration/start/end
+   * dates, amount, frequency, estimated next-due) — the frontend builds
+   * both the AMC->Scheme->Client hierarchy and the reverse Client->Scheme
+   * view from this same flat list via grouping, rather than the backend
+   * shipping two redundant nested structures for a dataset this small.
+   * Same underlying SipRegistration rows the dashboard's Active SIP Value/
+   * Count and the SIP Addition/Expiring reports already use — this is a
+   * different view of the same real data, not a separate source. Scoped to
+   * registrationType: "SIP" (see getRegistrationReport's doc comment).
+   */
+  async getSipExplorer(requestedArnProfileIds?: string[]) {
+    const distributorId = TenantContext.currentDistributorId();
+    const arnScope = await this.resolveArnScope(requestedArnProfileIds);
+    const registrations = await prisma.sipRegistration.findMany({
+      where: {
+        distributorId,
+        registrationType: "SIP",
+        ...(arnScope ? { folio: { arnProfileId: { in: arnScope } } } : {}),
+      },
+      orderBy: [{ isActive: "desc" }, { registrationDate: "desc" }],
+      include: {
+        folio: {
+          select: {
+            folioNumber: true,
+            amcCode: true,
+            schemeCode: true,
+            schemeName: true,
+            client: { select: { id: true, name: true } },
+          },
+        },
+      },
+    });
+
+    const today = new Date();
+    return registrations.map((r) => ({
+      id: r.id,
+      clientId: r.folio.client.id,
+      clientName: r.folio.client.name,
+      amcCode: r.folio.amcCode,
+      amcName: resolveAmcName(r.folio.schemeName, r.folio.amcCode),
+      schemeName: r.folio.schemeName ?? r.schemeCode,
+      folioNumber: r.folio.folioNumber,
+      sipAmount: r.sipAmount?.toString() ?? null,
+      frequency: r.frequency,
+      startDate: r.startDate,
+      endDate: r.endDate,
+      registrationDate: r.registrationDate,
+      ceaseDate: r.ceaseDate,
+      isActive: r.isActive,
+      estimatedNextDueDate: r.isActive && r.startDate ? estimateNextDueDate(r.startDate, r.frequency, today)?.toISOString().slice(0, 10) ?? null : null,
+    }));
+  }
+
+  /**
+   * Distributor report: active SIPs whose endDate falls within the window
+   * — real data, direct from SipRegistration.endDate. Scoped to
+   * registrationType: "SIP" (see getRegistrationReport's doc comment).
+   */
   async getSipExpiringReport(withinDays = 30, requestedArnProfileIds?: string[]) {
     const distributorId = TenantContext.currentDistributorId();
     const arnScope = await this.resolveArnScope(requestedArnProfileIds);
@@ -989,6 +1227,7 @@ export class ReportsService {
     const sips = await prisma.sipRegistration.findMany({
       where: {
         distributorId,
+        registrationType: "SIP",
         isActive: true,
         endDate: { not: null, lte: cutoff },
         ...(arnScope ? { folio: { arnProfileId: { in: arnScope } } } : {}),
@@ -1103,59 +1342,6 @@ export class ReportsService {
         units: r.units?.toString() ?? null,
         expiryDate: r.expiryDate,
         taxStatus: r.taxStatus,
-      })),
-    };
-  }
-
-  /**
-   * Distributor reports: STP/SWP — inferred from transaction history, NOT
-   * a dedicated registration feed (unlike SIP, no WBR/MFSD report code for
-   * STP/SWP mandates is ingested, so there's no standing-instruction
-   * record — only the transactions a mandate produces after the fact).
-   * STP = every SWITCH_IN/SWITCH_OUT transaction; SWP = every REDEMPTION.
-   * Labeled clearly in the frontend as "transactions that look like
-   * STP/SWP", since a one-off manual switch/redemption is
-   * indistinguishable from a systematic one in this data.
-   */
-  async getStpReport(page: number, requestedArnProfileIds?: string[]) {
-    return this.getTransactionsByTypeReport(["SWITCH_IN", "SWITCH_OUT"], page, requestedArnProfileIds);
-  }
-
-  async getSwpReport(page: number, requestedArnProfileIds?: string[]) {
-    return this.getTransactionsByTypeReport(["REDEMPTION"], page, requestedArnProfileIds);
-  }
-
-  private async getTransactionsByTypeReport(types: string[], page: number, requestedArnProfileIds?: string[]) {
-    const distributorId = TenantContext.currentDistributorId();
-    const arnScope = await this.resolveArnScope(requestedArnProfileIds);
-    const where = {
-      distributorId,
-      transactionType: { in: types },
-      ...(arnScope ? { folio: { arnProfileId: { in: arnScope } } } : {}),
-    };
-    const [total, transactions] = await Promise.all([
-      prisma.transaction.count({ where }),
-      prisma.transaction.findMany({
-        where,
-        orderBy: { transactionDate: "desc" },
-        skip: (page - 1) * PAGE_SIZE,
-        take: PAGE_SIZE,
-        include: { folio: { select: { folioNumber: true, schemeName: true, client: { select: { name: true } } } } },
-      }),
-    ]);
-    return {
-      total,
-      page,
-      pageSize: PAGE_SIZE,
-      transactions: transactions.map((t) => ({
-        id: t.id,
-        clientName: t.folio.client.name,
-        folioNumber: t.folio.folioNumber,
-        schemeName: t.folio.schemeName,
-        transactionType: t.transactionType,
-        transactionDate: t.transactionDate,
-        amount: t.amount?.toString() ?? null,
-        units: t.units?.toString() ?? null,
       })),
     };
   }
@@ -1354,32 +1540,4 @@ export class ReportsService {
 
     return results.sort((a, b) => Number(b.currentValue) - Number(a.currentValue));
   }
-}
-
-/** Newton-Raphson XIRR — returns null (never NaN/Infinity) if it doesn't converge within 100 iterations, rather than a garbage number. */
-function computeXirr(cashFlows: Array<{ date: Date; amount: number }>): number | null {
-  if (cashFlows.length < 2) return null;
-  const t0 = cashFlows[0].date.getTime();
-  const years = cashFlows.map((cf) => (cf.date.getTime() - t0) / (365 * 24 * 60 * 60 * 1000));
-
-  function npv(rate: number): number {
-    return cashFlows.reduce((sum, cf, i) => sum + cf.amount / Math.pow(1 + rate, years[i]), 0);
-  }
-  function npvDerivative(rate: number): number {
-    return cashFlows.reduce((sum, cf, i) => sum - (years[i] * cf.amount) / Math.pow(1 + rate, years[i] + 1), 0);
-  }
-
-  let rate = 0.1;
-  for (let i = 0; i < 100; i++) {
-    const value = npv(rate);
-    const derivative = npvDerivative(rate);
-    if (Math.abs(derivative) < 1e-10) break;
-    const nextRate = rate - value / derivative;
-    if (!Number.isFinite(nextRate)) break;
-    if (Math.abs(nextRate - rate) < 1e-7) {
-      return nextRate;
-    }
-    rate = nextRate;
-  }
-  return Number.isFinite(rate) && Math.abs(npv(rate)) < 1 ? rate : null;
 }
