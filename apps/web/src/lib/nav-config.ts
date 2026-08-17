@@ -12,6 +12,7 @@ import {
   Wrench,
   KeyRound,
   UsersRound,
+  UserCircle,
 } from "lucide-react";
 
 export interface NavItem {
@@ -34,4 +35,5 @@ export const NAV_ITEMS: NavItem[] = [
   { label: "Reports", path: "/reports", icon: FileText },
   { label: "Tools", path: "/tools", icon: Wrench },
   { label: "RTA Sync Settings", path: "/settings/rta-sync", icon: KeyRound },
+  { label: "Profile", path: "/profile", icon: UserCircle },
 ];

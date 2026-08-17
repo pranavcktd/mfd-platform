@@ -9,7 +9,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const logout = useLogout();
 
   return (
-    <div data-app-shell className="flex min-h-screen bg-page text-ink">
+    <div data-app-shell className="flex h-screen overflow-hidden bg-page text-ink">
       <aside className="flex w-60 shrink-0 flex-col border-r border-[var(--border)] bg-surface">
         <div className="flex h-14 items-center px-5 text-sm font-semibold tracking-wide text-ink">
           MFD Platform

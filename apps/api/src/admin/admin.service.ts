@@ -182,16 +182,14 @@ export class AdminService {
    * AuthService.changePassword, which is for a logged-in distributor
    * changing their own password, not for support recovering a forgotten
    * one. Always resets to the same fixed default used at onboarding
-   * ("Admin@123"), not an admin-chosen value — and, per explicit design
-   * (2026-07-23), does NOT force a change-password prompt afterward: the
-   * MFD can keep using the default or change it, their choice. This is
-   * deliberately different from onboarding's mustChangePassword=true.
+   * ("Admin@123"), not an admin-chosen value — and forces a change-password
+   * prompt on next login (mustChangePassword=true), same as onboarding.
    */
   async resetPassword(distributorId: string): Promise<{ newPassword: string }> {
     const passwordHash = await bcrypt.hash(DEFAULT_ONBOARDING_PASSWORD, BCRYPT_ROUNDS);
     await prisma.distributor.update({
       where: { id: distributorId },
-      data: { passwordHash, mustChangePassword: false },
+      data: { passwordHash, mustChangePassword: true },
     });
     await logAdminAction("RESET_PASSWORD", distributorId);
     return { newPassword: DEFAULT_ONBOARDING_PASSWORD };

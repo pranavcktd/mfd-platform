@@ -17,6 +17,7 @@ import { BrokeragePage } from "./pages/BrokeragePage";
 import { AnalysisPage } from "./pages/AnalysisPage";
 import { ToolsPage } from "./pages/ToolsPage";
 import { RtaSyncSettingsPage } from "./pages/RtaSyncSettingsPage";
+import { ProfilePage } from "./pages/ProfilePage";
 import { ImportExternalDataPage } from "./pages/ImportExternalDataPage";
 import { SuperAdminLoginPage } from "./pages/SuperAdminLoginPage";
 import { SuperAdminMfdListPage } from "./pages/SuperAdminMfdListPage";
@@ -114,6 +115,7 @@ export function App() {
                 <Route path="/reports" element={<ReportsPage />} />
                 <Route path="/tools" element={<ToolsPage />} />
                 <Route path="/settings/rta-sync" element={<RtaSyncSettingsPage />} />
+                <Route path="/profile" element={<ProfilePage />} />
                 {NAV_ITEMS.filter((item) => item.comingSoon).map((item) => (
                   <Route key={item.path} path={item.path} element={<ComingSoonPage title={item.label} />} />
                 ))}

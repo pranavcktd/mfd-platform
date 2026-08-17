@@ -306,6 +306,9 @@ function UnclassifiedAumTile({ value, isLoading, arnIds }: { value: string; isLo
  * quiet ticker strip, not a KPI tile, since it's context rather than a
  * number this platform is authoritative on.
  */
+/** Anything older than a day-and-a-bit isn't just "after hours" (a normal weeknight/weekend gap) — it means the upstream feed itself has stopped updating for this symbol. */
+const STALE_QUOTE_THRESHOLD_MS = 30 * 60 * 60 * 1000;
+
 function MarketTickerQuote({ quote }: { quote: MarketQuote | null }) {
   if (!quote) {
     return <span className="text-ink-muted">—</span>;
@@ -319,8 +322,14 @@ function MarketTickerQuote({ quote }: { quote: MarketQuote | null }) {
     ? `₹${quote.price.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
     : quote.price.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
+  const asOfDate = new Date(quote.asOf);
+  const isStale = Date.now() - asOfDate.getTime() > STALE_QUOTE_THRESHOLD_MS;
+  const asOfText = isStale
+    ? `delayed since ${asOfDate.toLocaleDateString("en-IN", { day: "2-digit", month: "short" })}`
+    : `as of ${asOfDate.toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit", hour12: true })}`;
+
   return (
-    <span className="flex items-center gap-2 text-sm">
+    <span className="flex items-center gap-2 text-sm" title={isStale ? "This symbol's live feed hasn't updated recently — price/change may lag the real market." : undefined}>
       <span className="font-medium text-ink-secondary">{quote.label}</span>
       <span className="tabular-nums font-semibold text-ink">{priceText}</span>
       <span className={`tabular-nums text-xs ${colorClass}`}>
@@ -328,6 +337,7 @@ function MarketTickerQuote({ quote }: { quote: MarketQuote | null }) {
         {quote.change.toFixed(2)} ({quote.changePercent >= 0 ? "+" : ""}
         {quote.changePercent.toFixed(2)}%)
       </span>
+      <span className={`text-[10px] ${isStale ? "text-status-warning" : "text-ink-muted"}`}>{asOfText}</span>
     </span>
   );
 }

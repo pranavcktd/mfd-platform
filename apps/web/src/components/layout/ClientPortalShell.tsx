@@ -16,7 +16,7 @@ export function ClientPortalShell({ children }: { children: ReactNode }) {
   const { data: me } = useClientPortalMe();
 
   return (
-    <div className="flex min-h-screen bg-page text-ink">
+    <div className="flex h-screen overflow-hidden bg-page text-ink">
       <aside className="flex w-60 shrink-0 flex-col border-r border-[var(--border)] bg-surface">
         <div className="flex h-14 items-center gap-2.5 px-5">
           <div className="rounded-md bg-series-1/10 p-1.5">
