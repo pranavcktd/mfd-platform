@@ -8,9 +8,23 @@ export type NavSyncJobData = Record<string, never>;
  * AMFI's real, current daily NAV file — confirmed live 2026-08-02 (the
  * older getNAVdata.php endpoint now serves an HTML app shell, not the raw
  * file). Free, public, no auth, one row per scheme+plan+option combination,
- * covering the whole industry. Format confirmed against a real download:
+ * covering the whole industry. www.amfiindia.com now 302-redirects to
+ * portal.amfiindia.com for this path (confirmed 2026-08-19) — harmless,
+ * since fetch() follows redirects by default; left as the www. URL so
+ * nothing breaks again if AMFI reverts the redirect.
+ *
+ * Format confirmed against a real download, and it has changed shape once
+ * already: originally 6 fields —
  *   Scheme Code;ISIN Div Payout/ ISIN Growth;ISIN Div Reinvestment;Scheme Name;Net Asset Value;Date
- * interspersed with blank lines and un-delimited category/AMC header lines
+ * — with Plan/Option folded into Scheme Name. As of 2026-08-19 AMFI split
+ * those into their own columns, 8 fields —
+ *   Scheme Code;ISIN Div Payout/ ISIN Growth;ISIN Div Reinvestment;Scheme Name;Plan;Option;Net Asset Value;Date
+ * — which silently broke the old fixed-position parse (every row read
+ * "Direct Plan" as the NAV, so every row failed the numeric check and the
+ * whole sync reported zero rows). parseAmfiNavFile below handles both
+ * shapes by field count, so a future reformat only breaks parsing again if
+ * it also changes the position of the trailing NAV/Date pair.
+ * Interspersed with blank lines and un-delimited category/AMC header lines
  * (skipped — anything without a ";" isn't a data row). Date is "DD-MMM-YYYY"
  * (e.g. "31-Jul-2026"), the exact same shape parseRtaDate already handles
  * for CAMS dates.
@@ -32,7 +46,18 @@ export function parseAmfiNavFile(text: string): ParsedNavRow[] {
     if (!line || !line.includes(";")) continue; // blank lines, category/AMC header lines
     const fields = line.split(";");
     if (fields.length < 6) continue;
-    const [schemeCode, isinPayoutOrGrowth, isinReinvestment, schemeName, navText, dateText] = fields;
+    // 8 fields (current): Plan/Option are their own columns. 6 fields
+    // (older shape, kept for resilience): Plan/Option are already folded
+    // into Scheme Name by AMFI. Either way the last two fields are always
+    // NAV then Date.
+    let schemeCode: string, isinPayoutOrGrowth: string, isinReinvestment: string, schemeNameOnly: string;
+    let plan: string | undefined, option: string | undefined, navText: string, dateText: string;
+    if (fields.length >= 8) {
+      [schemeCode, isinPayoutOrGrowth, isinReinvestment, schemeNameOnly, plan, option, navText, dateText] = fields;
+    } else {
+      [schemeCode, isinPayoutOrGrowth, isinReinvestment, schemeNameOnly, navText, dateText] = fields;
+    }
+    const schemeName = [schemeNameOnly?.trim(), plan?.trim(), option?.trim()].filter(Boolean).join(" - ");
     if (schemeCode === "Scheme Code") continue; // header row
 
     // Each AMFI row is already one specific scheme+plan+option — normally
